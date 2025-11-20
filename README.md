@@ -1,5 +1,6 @@
 # Godot Text Snapshot
 ![Screenshot](visuals/2.png)
+
 Godot 4 plugin that exports selected GDScript files, Scene trees, and Project Settings into a single text file or clipboard.
 
 **Primary Use Case:** Quickly gathering project context to share with LLMs or for documentation.
