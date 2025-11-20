@@ -1,36 +1,25 @@
-# Godot Script Exporter Plugin
-This repository contains the source code for "Script Exporter" plugin for Godot Engine.
+# Godot Text Snapshot
+![Screenshot](visuals/2.png)
+Godot 4 plugin that exports selected GDScript files, Scene trees, and Project Settings into a single text file or clipboard.
 
-This tool allows you to select multiple GDScript files from your project and export their contents into a single text file or copy them directly to your clipboard. It's very useful for sharing code or preparing it for AI assistants.
+**Primary Use Case:** Quickly gathering project context to share with LLMs or for documentation.
 
-## Screenshots
-
-**Main Window:** Select scripts, choose options, and export.
-![Script Exporter Window](visuals/1.png)
-
-**Example Output:** Exported text is cleanly formatted with headers for each script.
-![Example of exported text file](visuals/2.png)
-
-**How to Access:** Plugin is easily accessible from `Tools` menu.
-![Accessing the plugin via the Tools menu](visuals/3.png)
-
+## Features
+*   📂 **Scripts:** Batch export `.gd` files (optionally grouped by folder).
+*   🌳 **Scenes:** Text-based visualization of Scene trees (includes Nodes, Signals, Groups, and Inspector changes).
+*   ⚙️ **Settings:** Includes `project.godot`, Autoloads (Globals), and cleaned-up Input Map.
+*   🤖 **LLM Ready:** Optional Markdown formatting (code blocks) for better parsing by AI.
+*   📋 **Output:** Copy directly to Clipboard or save to `res://text_snapshot.txt`.
 
 ## Installation
+1. Copy the folder containing this plugin into your project's `addons/` directory.
+2. Go to **Project → Project Settings → Plugins** and enable **Godot Text Snapshot**.
 
-1.  **(Recommended)** Find and install "Script Exporter" in Godot Engine's Asset Library tab.
-2.  **(Manual)** Download this repository, and copy `addons/ScriptExporter` folder into `addons` folder of your Godot project.
-
-Then, enable the plugin in `Project -> Project Settings -> Plugins`.
-
-## About this Repository
-
-Actual plugin code is located in `addons/ScriptExporter` directory. This structure is required for the Godot Asset Library. `README.md` file in that directory contains the user-facing documentation displayed in the Asset Library.
-
-## Acknowledgements
-
-This plugin was inspired by the idea and great UI of [Scene Tree as Text](https://github.com/CyrylSz/scene-tree-as-text) plugin by Cyryl Szczakowski.
-
-Both plugins complement each other perfectly. While **Scene Tree as Text** exports the *structure* of your scenes, **Script Exporter** provides the *code* that brings those scenes to life. Using them together is a great way to get a complete snapshot of your project for sharing or analysis.
+## Usage
+1. Navigate to **Project → Tools → Text Snapshot...**
+2. Select the scripts and scenes you want to include.
+3. (Optional) Configure formatting in the footer (e.g., wrap in Markdown).
+4. Click **Copy to Clipboard** or **Save to File**.
 
 ## License
-This project is licensed under the MIT License.
+MIT
