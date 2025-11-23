@@ -1,7 +1,7 @@
 @tool
 extends EditorPlugin
 
-## Exports selected GDScript files, Scene trees, and Project Settings into a single text file or clipboard.
+## Exports selected GDScript/C# files, Scene trees, and Project Settings into a single text file or clipboard.
 ## useful for sharing context with LLMs or documentation.
 
 #region Constants & Configuration
@@ -81,11 +81,11 @@ var wrap_autoloads_in_markdown: bool = true
 #-----------------------------------------------------------------------------
 
 func _enter_tree() -> void:
-	add_tool_menu_item("Text Snapshot...", Callable(self, "open_window"))
+	add_tool_menu_item("Context Exporter...", Callable(self, "open_window"))
 	_setup_ui()
 
 func _exit_tree() -> void:
-	remove_tool_menu_item("Text Snapshot...")
+	remove_tool_menu_item("Context Exporter...")
 	if is_instance_valid(window):
 		window.queue_free()
 	if is_instance_valid(format_manager_dialog):
@@ -99,7 +99,7 @@ func _exit_tree() -> void:
 
 func _setup_ui() -> void:
 	window = Window.new()
-	window.title = "Godot Text Snapshot"
+	window.title = "Godot Context Exporter"
 	window.min_size = Vector2i(600, 750)
 	window.size = Vector2i(700, 850)
 	window.visible = false
@@ -179,7 +179,8 @@ func _create_scripts_tab() -> Control:
 	list_panel.add_child(script_list)
 
 	wrap_in_markdown_checkbox = CheckBox.new()
-	wrap_in_markdown_checkbox.text = "Wrap code in Markdown (```gdscript```)"
+	# Changed label to reflect C# support
+	wrap_in_markdown_checkbox.text = "Wrap code in Markdown (```gdscript``` / ```csharp```)"
 	wrap_in_markdown_checkbox.toggled.connect(func(p): wrap_in_markdown = p)
 	vbox.add_child(wrap_in_markdown_checkbox)
 	
@@ -391,8 +392,13 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 #-----------------------------------------------------------------------------
 
 func open_window() -> void:
-	all_script_paths = _find_files_recursive("res://", ".gd")
+	# Scan for both .gd and .cs files
+	var gd_scripts = _find_files_recursive("res://", ".gd")
+	var cs_scripts = _find_files_recursive("res://", ".cs")
+	
+	all_script_paths = gd_scripts + cs_scripts
 	all_script_paths.sort()
+	
 	all_scene_paths = _find_files_recursive("res://", ".tscn")
 	all_scene_paths.sort()
 	
@@ -615,7 +621,7 @@ func _export_selected(to_clipboard: bool) -> void:
 		DisplayServer.clipboard_set(content_text)
 		_set_status_message("Success! Copied " + items_str + "." + stats_line, COLOR_COPY_TEXT)
 	else:
-		var output_path = "res://text_snapshot.txt"
+		var output_path = "res://context_export.txt"
 		var file = FileAccess.open(output_path, FileAccess.WRITE)
 		if file:
 			file.store_string(content_text)
@@ -640,7 +646,8 @@ func _get_project_autoloads() -> Dictionary:
 			if path.begins_with("*"):
 				path = path.substr(1)
 				
-			if path.ends_with(".gd"):
+			# Check for both .gd and .cs
+			if path.ends_with(".gd") or path.ends_with(".cs"):
 				result["scripts"].append(path)
 			elif path.ends_with(".tscn"):
 				result["scenes"].append(path)
@@ -749,7 +756,12 @@ func _build_scripts_content(paths: Array, use_markdown_override = null) -> Strin
 			var file_content = file.get_as_text()
 			content += "--- SCRIPT: " + file_path + " ---\n\n"
 			if do_wrap:
-				content += "```gdscript\n" + file_content + "\n```\n\n"
+				# Detect language for markdown
+				var lang_tag = "gdscript"
+				if file_path.ends_with(".cs"):
+					lang_tag = "csharp"
+				
+				content += "```" + lang_tag + "\n" + file_content + "\n```\n\n"
 			else:
 				content += file_content + "\n\n"
 	return content.rstrip("\n")
