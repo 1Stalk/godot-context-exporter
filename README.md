@@ -1,3 +1,5 @@
+[![Godot Asset Library](https://img.shields.io/badge/Godot%20Asset-Library-478cbf?style=for-the-badge&logo=godot-engine)](https://godotengine.org/asset-library/asset/4500)
+
 # Godot Context Exporter
 ![Screenshot](visuals/2.png)
 
