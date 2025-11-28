@@ -28,22 +28,32 @@ const THEME_LIST_BG = Color("#2c3036")
 var window: Window
 var status_label: Label
 
-# Scripts Tab
+# Scripts Tab UI
 var script_list: ItemList
 var select_all_scripts_checkbox: CheckBox
 var group_by_folder_checkbox: CheckBox
 var wrap_in_markdown_checkbox: CheckBox
+var group_depth_spinbox: SpinBox
+var expand_all_scripts_button: Button
+var collapse_all_scripts_button: Button
 
-# Scenes Tab
+# Scenes Tab UI
 var scene_list: ItemList
 var select_all_scenes_checkbox: CheckBox
 var include_inspector_checkbox: CheckBox
 var collapse_scenes_checkbox: CheckBox
 var wrap_scenes_in_markdown_checkbox: CheckBox
+var scene_group_by_folder_checkbox: CheckBox
+var scene_group_depth_spinbox: SpinBox
+var scene_expand_all_button: Button
+var scene_collapse_all_button: Button
 
 # Format Manager (Popup)
 var format_manager_dialog: Window
 var formats_list_vbox: VBoxContainer
+
+# Advanced Settings (Popup)
+var advanced_settings_dialog: Window
 
 #endregion
 
@@ -52,15 +62,21 @@ var formats_list_vbox: VBoxContainer
 #-----------------------------------------------------------------------------
 
 # Script State
-var group_by_folder: bool = false
+var group_by_folder: bool = true
+var group_depth: int = 0 # 0 = Auto/Tree, 1+ = Flat depth
 var wrap_in_markdown: bool = false
 var all_script_paths: Array[String] = []
-var folder_data: Dictionary = {}
-var is_script_model_built: bool = false
+var folder_data: Dictionary = {} # For flat grouping
+var tree_nodes: Dictionary = {}  # For recursive tree (depth 0)
 
 # Scene State
+var scene_group_by_folder: bool = true
+var scene_group_depth: int = 0 # 0 = Auto/Tree, 1+ = Flat depth
 var all_scene_paths: Array[String] = []
-var checked_scene_paths: Array[String] = []
+# var checked_scene_paths: Array[String] = [] # Not used anymore
+var scene_folder_data: Dictionary = {} # For flat grouping
+var scene_tree_nodes: Dictionary = {}  # For recursive tree (depth 0)
+
 var include_inspector_changes: bool = false
 var wrap_scene_in_markdown: bool = false
 var collapse_instanced_scenes: bool = false
@@ -73,6 +89,9 @@ var wrap_project_godot_in_markdown: bool = false
 # Autoloads State
 var include_autoloads: bool = true
 var wrap_autoloads_in_markdown: bool = true
+
+# Advanced Settings State
+var include_addons: bool = false
 
 #endregion
 
@@ -90,6 +109,8 @@ func _exit_tree() -> void:
 		window.queue_free()
 	if is_instance_valid(format_manager_dialog):
 		format_manager_dialog.queue_free()
+	if is_instance_valid(advanced_settings_dialog):
+		advanced_settings_dialog.queue_free()
 
 #endregion
 
@@ -161,10 +182,50 @@ func _create_scripts_tab() -> Control:
 	select_all_scripts_checkbox.pressed.connect(_on_select_all_scripts_toggled)
 	options_hbox.add_child(select_all_scripts_checkbox)
 	
+	options_hbox.add_child(VSeparator.new())
+	
 	group_by_folder_checkbox = CheckBox.new()
 	group_by_folder_checkbox.text = "Group by Folder"
+	group_by_folder_checkbox.button_pressed = true 
 	group_by_folder_checkbox.toggled.connect(_on_group_by_folder_toggled)
 	options_hbox.add_child(group_by_folder_checkbox)
+	
+	# Settings Depth
+	var depth_hbox = HBoxContainer.new()
+	options_hbox.add_child(depth_hbox)
+	
+	var depth_label = Label.new()
+	depth_label.text = "Depth:"
+	depth_label.tooltip_text = "0 = Recursive Tree (Auto)\n1 = Root level\n2 = Subfolder level"
+	depth_hbox.add_child(depth_label)
+	
+	group_depth_spinbox = SpinBox.new()
+	group_depth_spinbox.min_value = 0
+	group_depth_spinbox.max_value = 10
+	group_depth_spinbox.value = group_depth
+	group_depth_spinbox.tooltip_text = depth_label.tooltip_text
+	group_depth_spinbox.editable = true
+	group_depth_spinbox.modulate.a = 1.0
+	
+	group_depth_spinbox.value_changed.connect(func(val): 
+		group_depth = int(val)
+		_build_script_data_model()
+		_render_script_list()
+	)
+	depth_hbox.add_child(group_depth_spinbox)
+	
+	# Buttons
+	options_hbox.add_child(VSeparator.new())
+	
+	expand_all_scripts_button = Button.new()
+	expand_all_scripts_button.text = "Expand All"
+	expand_all_scripts_button.pressed.connect(_on_expand_collapse_scripts.bind(true))
+	options_hbox.add_child(expand_all_scripts_button)
+	
+	collapse_all_scripts_button = Button.new()
+	collapse_all_scripts_button.text = "Collapse All"
+	collapse_all_scripts_button.pressed.connect(_on_expand_collapse_scripts.bind(false))
+	options_hbox.add_child(collapse_all_scripts_button)
 	
 	var list_panel = _create_list_panel()
 	list_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -179,7 +240,6 @@ func _create_scripts_tab() -> Control:
 	list_panel.add_child(script_list)
 
 	wrap_in_markdown_checkbox = CheckBox.new()
-	# Changed label to reflect C# support
 	wrap_in_markdown_checkbox.text = "Wrap code in Markdown (```gdscript``` / ```csharp```)"
 	wrap_in_markdown_checkbox.toggled.connect(func(p): wrap_in_markdown = p)
 	vbox.add_child(wrap_in_markdown_checkbox)
@@ -197,23 +257,74 @@ func _create_scenes_tab() -> Control:
 	scenes_label.fit_content = true
 	vbox.add_child(scenes_label)
 
+	var options_hbox = HBoxContainer.new()
+	vbox.add_child(options_hbox)
+
 	select_all_scenes_checkbox = CheckBox.new()
 	select_all_scenes_checkbox.text = "Select All"
 	select_all_scenes_checkbox.add_theme_color_override("font_color", COLOR_ACCENT)
 	select_all_scenes_checkbox.pressed.connect(_on_select_all_scenes_toggled)
-	vbox.add_child(select_all_scenes_checkbox)
+	options_hbox.add_child(select_all_scenes_checkbox)
 	
+	options_hbox.add_child(VSeparator.new())
+	
+	scene_group_by_folder_checkbox = CheckBox.new()
+	scene_group_by_folder_checkbox.text = "Group by Folder"
+	scene_group_by_folder_checkbox.button_pressed = true
+	scene_group_by_folder_checkbox.toggled.connect(_on_scene_group_by_folder_toggled)
+	options_hbox.add_child(scene_group_by_folder_checkbox)
+
+	# Scene Depth Settings
+	var depth_hbox = HBoxContainer.new()
+	options_hbox.add_child(depth_hbox)
+	
+	var depth_label = Label.new()
+	depth_label.text = "Depth:"
+	depth_label.tooltip_text = "0 = Recursive Tree (Auto)\n1 = Root level\n2 = Subfolder level"
+	depth_hbox.add_child(depth_label)
+	
+	scene_group_depth_spinbox = SpinBox.new()
+	scene_group_depth_spinbox.min_value = 0
+	scene_group_depth_spinbox.max_value = 10
+	scene_group_depth_spinbox.value = scene_group_depth
+	scene_group_depth_spinbox.tooltip_text = depth_label.tooltip_text
+	scene_group_depth_spinbox.editable = true
+	scene_group_depth_spinbox.modulate.a = 1.0
+	
+	scene_group_depth_spinbox.value_changed.connect(func(val): 
+		scene_group_depth = int(val)
+		_build_scene_data_model()
+		_render_scene_list()
+	)
+	depth_hbox.add_child(scene_group_depth_spinbox)
+
+	# Buttons
+	options_hbox.add_child(VSeparator.new())
+	
+	scene_expand_all_button = Button.new()
+	scene_expand_all_button.text = "Expand All"
+	scene_expand_all_button.pressed.connect(_on_expand_collapse_scenes.bind(true))
+	options_hbox.add_child(scene_expand_all_button)
+	
+	scene_collapse_all_button = Button.new()
+	scene_collapse_all_button.text = "Collapse All"
+	scene_collapse_all_button.pressed.connect(_on_expand_collapse_scenes.bind(false))
+	options_hbox.add_child(scene_collapse_all_button)
+	
+	# List
 	var list_panel = _create_list_panel()
 	list_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(list_panel)
 
 	scene_list = ItemList.new()
-	scene_list.select_mode = ItemList.SELECT_MULTI
+	scene_list.select_mode = ItemList.SELECT_SINGLE # Use SINGLE, logic multi choose have its own
+	scene_list.allow_reselect = true
 	scene_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scene_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scene_list.item_clicked.connect(_on_scene_item_clicked)
 	list_panel.add_child(scene_list)
 
+	# Extra Options
 	include_inspector_checkbox = CheckBox.new()
 	include_inspector_checkbox.text = "Include non-default Inspector properties"
 	include_inspector_checkbox.toggled.connect(func(p): include_inspector_changes = p)
@@ -239,6 +350,60 @@ func _create_scenes_tab() -> Control:
 
 	return vbox
 
+func _create_advanced_settings_dialog() -> void:
+	advanced_settings_dialog = Window.new()
+	advanced_settings_dialog.title = "Advanced Settings"
+	advanced_settings_dialog.min_size = Vector2i(300, 200)
+	advanced_settings_dialog.size = Vector2i(400, 250)
+	advanced_settings_dialog.close_requested.connect(advanced_settings_dialog.hide)
+	window.add_child(advanced_settings_dialog)
+	
+	var bg_panel = PanelContainer.new()
+	var style = StyleBoxFlat.new()
+	style.bg_color = THEME_BG_COLOR
+	bg_panel.add_theme_stylebox_override("panel", style)
+	bg_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	advanced_settings_dialog.add_child(bg_panel)
+	
+	var margin = MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 15)
+	margin.add_theme_constant_override("margin_right", 15)
+	margin.add_theme_constant_override("margin_top", 15)
+	margin.add_theme_constant_override("margin_bottom", 15)
+	bg_panel.add_child(margin)
+	
+	var vbox = VBoxContainer.new()
+	margin.add_child(vbox)
+	
+	var label = Label.new()
+	label.text = "Scanning Options"
+	label.add_theme_color_override("font_color", COLOR_ACCENT)
+	vbox.add_child(label)
+	
+	vbox.add_child(HSeparator.new())
+	
+	var addons_checkbox = CheckBox.new()
+	addons_checkbox.text = "Include 'addons/' folder content"
+	addons_checkbox.button_pressed = include_addons
+	addons_checkbox.toggled.connect(_on_include_addons_toggled)
+	vbox.add_child(addons_checkbox)
+	
+	var info_label = Label.new()
+	info_label.text = "Note: Including addons can significantly increase the list size."
+	info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info_label.modulate = Color(1, 1, 1, 0.6)
+	vbox.add_child(info_label)
+	
+	var spacer = Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(spacer)
+	
+	var close_btn = Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(advanced_settings_dialog.hide)
+	vbox.add_child(close_btn)
+
 func _create_format_manager_dialog() -> void:
 	format_manager_dialog = Window.new()
 	format_manager_dialog.title = "Manage Collapsible Formats"
@@ -247,13 +412,20 @@ func _create_format_manager_dialog() -> void:
 	format_manager_dialog.close_requested.connect(format_manager_dialog.hide)
 	window.add_child(format_manager_dialog)
 	
+	var bg_panel = PanelContainer.new()
+	var style = StyleBoxFlat.new()
+	style.bg_color = THEME_BG_COLOR
+	bg_panel.add_theme_stylebox_override("panel", style)
+	bg_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	format_manager_dialog.add_child(bg_panel)
+	
 	var margin = MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	margin.add_theme_constant_override("margin_left", 10)
 	margin.add_theme_constant_override("margin_right", 10)
 	margin.add_theme_constant_override("margin_top", 10)
 	margin.add_theme_constant_override("margin_bottom", 10)
-	format_manager_dialog.add_child(margin)
+	bg_panel.add_child(margin)
 	
 	var main_vbox = VBoxContainer.new()
 	margin.add_child(main_vbox)
@@ -359,7 +531,19 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 			wrap_project_godot_checkbox.button_pressed = false
 	)
 
-	# --- Action Buttons ---
+	# --- Action Buttons Row 1 (Settings) ---
+	var settings_hbox = HBoxContainer.new()
+	settings_hbox.alignment = BoxContainer.ALIGNMENT_END
+	parent.add_child(settings_hbox)
+	
+	var adv_btn = Button.new()
+	adv_btn.text = "Advanced Settings"
+	adv_btn.flat = true
+	adv_btn.add_theme_color_override("font_color", COLOR_ACCENT)
+	adv_btn.pressed.connect(_on_advanced_settings_pressed)
+	settings_hbox.add_child(adv_btn)
+
+	# --- Action Buttons Row 2 (Export) ---
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 20)
 	hbox.alignment = HBoxContainer.ALIGNMENT_CENTER
@@ -392,88 +576,293 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 #-----------------------------------------------------------------------------
 
 func open_window() -> void:
-	# Scan for both .gd and .cs files
-	var gd_scripts = _find_files_recursive("res://", ".gd")
-	var cs_scripts = _find_files_recursive("res://", ".cs")
-	
-	all_script_paths = gd_scripts + cs_scripts
-	all_script_paths.sort()
-	
-	all_scene_paths = _find_files_recursive("res://", ".tscn")
-	all_scene_paths.sort()
-	
-	# Check flag before rebuilding to preserve selection state if window was closed but not freed
-	if not is_script_model_built:
-		_build_script_data_model()
-		is_script_model_built = true
-	
-	_render_script_list()
-	_render_scene_list()
+	_scan_and_refresh()
 	
 	status_label.remove_theme_color_override("font_color")
 	status_label.text = "Select scripts and/or scenes to export."
 	window.popup_centered()
 
-func _build_script_data_model() -> void:
-	folder_data.clear()
-	var folders = {}
-	for path in all_script_paths:
-		var dir = path.get_base_dir()
-		if not folders.has(dir): folders[dir] = []
-		folders[dir].append(path)
+func _scan_and_refresh() -> void:
+	# Scripts
+	var gd_scripts = _find_files_recursive("res://", ".gd")
+	var cs_scripts = _find_files_recursive("res://", ".cs")
+	all_script_paths = gd_scripts + cs_scripts
+	all_script_paths.sort()
+	
+	# Scenes
+	all_scene_paths = _find_files_recursive("res://", ".tscn")
+	all_scene_paths.sort()
+	
+	_build_script_data_model()
+	_render_script_list()
+	
+	_build_scene_data_model()
+	_render_scene_list()
 
-	for dir in folders.keys():
-		folder_data[dir] = { "is_expanded": true, "is_checked": false, "scripts": {} }
-		for script_path in folders[dir]:
-			folder_data[dir]["scripts"][script_path] = {"is_checked": false}
+# --- Scripts Model ---
+func _build_script_data_model() -> void:
+	if group_depth == 0:
+		_build_recursive_tree_data(all_script_paths, tree_nodes, "tree_nodes")
+	else:
+		_build_flat_group_data(all_script_paths, folder_data, group_depth)
+
+# --- Scenes Model ---
+func _build_scene_data_model() -> void:
+	if scene_group_depth == 0:
+		_build_recursive_tree_data(all_scene_paths, scene_tree_nodes, "scene_tree_nodes")
+	else:
+		_build_flat_group_data(all_scene_paths, scene_folder_data, scene_group_depth)
+
+# --- Generic Logic Helpers ---
+
+func _get_group_dir_for_path(path: String, depth: int) -> String:
+	if depth == 0: return path.get_base_dir() # Should handle recursive elsewhere
+	
+	var clean_path = path.trim_prefix("res://")
+	var parts = clean_path.split("/")
+	
+	if parts.size() - 1 < depth:
+		return path.get_base_dir()
+		
+	var subset = parts.slice(0, depth)
+	return "res://" + "/".join(subset)
+
+func _build_flat_group_data(all_paths: Array[String], out_data: Dictionary, depth: int) -> void:
+	# Save state
+	var old_checked = {}
+	for dir in out_data:
+		if out_data[dir].has("items"):
+			for path in out_data[dir]["items"]:
+				if out_data[dir]["items"][path]["is_checked"]:
+					old_checked[path] = true
+
+	out_data.clear()
+
+	for path in all_paths:
+		var dir = _get_group_dir_for_path(path, depth)
+		
+		if not out_data.has(dir):
+			out_data[dir] = { "is_expanded": true, "is_checked": false, "items": {} }
+		
+		var is_checked = old_checked.has(path)
+		out_data[dir]["items"][path] = {"is_checked": is_checked}
+	
+	# Update group check state
+	for dir in out_data:
+		var all_checked = true
+		var items = out_data[dir]["items"]
+		if items.is_empty(): all_checked = false
+		else:
+			for path in items:
+				if not items[path]["is_checked"]:
+					all_checked = false; break
+		out_data[dir]["is_checked"] = all_checked
+
+func _build_recursive_tree_data(all_paths: Array[String], out_nodes: Dictionary, state_key_hint: String) -> void:
+	var old_state = out_nodes.duplicate(true)
+	out_nodes.clear()
+	
+	# Root
+	if not out_nodes.has("res://"):
+		var was_expanded = true
+		if old_state.has("res://"): was_expanded = old_state["res://"]["is_expanded"]
+		out_nodes["res://"] = { 
+			"type": "folder", "parent": "", "children": [], 
+			"is_expanded": was_expanded, "is_checked": false 
+		}
+
+	for file_path in all_paths:
+		var was_checked = false
+		if old_state.has(file_path): was_checked = old_state[file_path]["is_checked"]
+		
+		out_nodes[file_path] = {
+			"type": "file",
+			"parent": file_path.get_base_dir(),
+			"children": [],
+			"is_expanded": false,
+			"is_checked": was_checked
+		}
+		
+		var current_path = file_path
+		while current_path != "res://":
+			var parent_dir = current_path.get_base_dir()
+			
+			if out_nodes.has(parent_dir):
+				if not out_nodes[parent_dir]["children"].has(current_path):
+					out_nodes[parent_dir]["children"].append(current_path)
+			else:
+				var dir_expanded = true
+				if old_state.has(parent_dir): dir_expanded = old_state[parent_dir]["is_expanded"]
+				
+				out_nodes[parent_dir] = {
+					"type": "folder",
+					"parent": parent_dir.get_base_dir(),
+					"children": [current_path],
+					"is_expanded": dir_expanded,
+					"is_checked": false
+				}
+			
+			current_path = parent_dir
+			if current_path == "res://" and not out_nodes["res://"]["children"].has(current_path):
+				# Safety catch, though loop should end
+				pass
+
+	# Update folder checks (simple pass)
+	for path in out_nodes:
+		if out_nodes[path]["type"] == "folder":
+			_update_tree_folder_checked_state(path, out_nodes)
+
+func _update_tree_folder_checked_state(folder_path: String, nodes_dict: Dictionary) -> bool:
+	if not nodes_dict.has(folder_path): return false
+	var node = nodes_dict[folder_path]
+	if node["type"] == "file": return node["is_checked"]
+	
+	if node["children"].is_empty():
+		node["is_checked"] = false
+		return false
+		
+	var all_children_checked = true
+	for child in node["children"]:
+		if not _update_tree_folder_checked_state(child, nodes_dict):
+			all_children_checked = false
+	
+	node["is_checked"] = all_children_checked
+	return all_children_checked
+
+# --- Script Rendering ---
 
 func _render_script_list() -> void:
 	script_list.clear()
-	if group_by_folder:
-		_render_grouped_script_list()
+	if group_depth == 0:
+		_render_recursive_tree_list(script_list, tree_nodes, "res://", 0, "script")
+	elif group_by_folder:
+		_render_flat_list(script_list, folder_data, "script")
 	else:
-		_render_flat_script_list()
+		_render_simple_flat_list(script_list, all_script_paths, folder_data, "script")
 
-func _render_flat_script_list() -> void:
-	for path in all_script_paths:
-		var is_checked = false
-		var dir = path.get_base_dir()
-		if folder_data.has(dir) and folder_data[dir]["scripts"].has(path):
-			is_checked = folder_data[dir]["scripts"][path]["is_checked"]
-		var checkbox = "☑ " if is_checked else "☐ "
-		script_list.add_item(checkbox + path.replace("res://", ""))
-		var idx = script_list.get_item_count() - 1
-		script_list.set_item_metadata(idx, {"type": "script", "path": path})
+# --- Scene Rendering ---
 
-func _render_grouped_script_list() -> void:
-	var sorted_folders = folder_data.keys(); sorted_folders.sort()
-	for dir in sorted_folders:
-		var folder_info = folder_data[dir]
-		var display_dir = dir.replace("res://", "")
-		if display_dir == "": display_dir = "res://"
-		var checkbox = "☑ " if folder_info.is_checked else "☐ "
-		var expand_symbol = "▾ " if folder_info.is_expanded else "▸ "
-		script_list.add_item(expand_symbol + checkbox + display_dir)
-		var folder_idx = script_list.get_item_count() - 1
-		script_list.set_item_metadata(folder_idx, {"type": "folder", "dir": dir})
-
-		if folder_info.is_expanded:
-			var sorted_scripts = folder_info.scripts.keys(); sorted_scripts.sort()
-			for script_path in sorted_scripts:
-				var script_info = folder_info.scripts[script_path]
-				var script_checkbox = "☑ " if script_info.is_checked else "☐ "
-				script_list.add_item("    " + script_checkbox + script_path.get_file())
-				var script_idx = script_list.get_item_count() - 1
-				script_list.set_item_metadata(script_idx, {"type": "script", "path": script_path})
-				
 func _render_scene_list() -> void:
 	scene_list.clear()
-	for path in all_scene_paths:
-		var is_checked = checked_scene_paths.has(path)
+	if scene_group_depth == 0:
+		_render_recursive_tree_list(scene_list, scene_tree_nodes, "res://", 0, "scene")
+	elif scene_group_by_folder:
+		_render_flat_list(scene_list, scene_folder_data, "scene")
+	else:
+		_render_simple_flat_list(scene_list, all_scene_paths, scene_folder_data, "scene")
+
+# --- Generic Rendering Helpers ---
+
+func _render_recursive_tree_list(list: ItemList, nodes: Dictionary, current_path: String, indent_level: int, item_type: String) -> void:
+	if not nodes.has(current_path): return
+	
+	var node = nodes[current_path]
+	var is_folder = (node["type"] == "folder")
+	
+	var indent_str = "    ".repeat(indent_level)
+	var checkbox = "☑ " if node["is_checked"] else "☐ "
+	
+	var icon = ""
+	var text_name = ""
+	
+	if is_folder:
+		icon = "▾ " if node["is_expanded"] else "▸ "
+		if current_path == "res://":
+			text_name = "res://"
+		else:
+			text_name = current_path.get_file() + "/"
+	else:
+		icon = "    " 
+		text_name = current_path.get_file()
+	
+	list.add_item(indent_str + icon + checkbox + text_name)
+	
+	var idx = list.get_item_count() - 1
+	list.set_item_metadata(idx, {
+		"mode": "tree",
+		"path": current_path,
+		"type": node["type"],
+		"item_type": item_type
+	})
+	
+	if is_folder and node["is_expanded"]:
+		var folders = []
+		var files = []
+		for child_path in node["children"]:
+			if nodes[child_path]["type"] == "folder":
+				folders.append(child_path)
+			else:
+				files.append(child_path)
+		
+		folders.sort()
+		files.sort()
+		
+		for f in folders: _render_recursive_tree_list(list, nodes, f, indent_level + 1, item_type)
+		for f in files: _render_recursive_tree_list(list, nodes, f, indent_level + 1, item_type)
+
+func _render_flat_list(list: ItemList, data_dict: Dictionary, item_type: String) -> void:
+	var sorted_folders = data_dict.keys(); sorted_folders.sort()
+	for dir in sorted_folders:
+		var folder_info = data_dict[dir]
+		var display_dir = dir.replace("res://", "")
+		if display_dir == "": display_dir = "res://"
+		elif not display_dir.ends_with("/"): display_dir += "/"
+		
+		var checkbox = "☑ " if folder_info.is_checked else "☐ "
+		var expand_symbol = "▾ " if folder_info.is_expanded else "▸ "
+		
+		list.add_item(expand_symbol + checkbox + display_dir)
+		var folder_idx = list.get_item_count() - 1
+		list.set_item_metadata(folder_idx, {"mode": "flat", "type": "folder", "dir": dir, "item_type": item_type})
+
+		if folder_info.is_expanded:
+			var sorted_items = folder_info.items.keys(); sorted_items.sort()
+			for path in sorted_items:
+				var item_info = folder_info.items[path]
+				var item_checkbox = "☑ " if item_info.is_checked else "☐ "
+				
+				var display_name = path
+				if dir != "res://" and path.begins_with(dir):
+					display_name = path.trim_prefix(dir).trim_prefix("/")
+				else:
+					display_name = path.replace("res://", "")
+				
+				var indent_str = "        "
+				list.add_item(indent_str + item_checkbox + display_name)
+				
+				var item_idx = list.get_item_count() - 1
+				list.set_item_metadata(item_idx, {"mode": "flat", "type": "file", "path": path, "item_type": item_type})
+
+func _render_simple_flat_list(list: ItemList, all_paths: Array[String], data_dict: Dictionary, item_type: String) -> void:
+	# Even in simple mode, we use data_dict to track checked state if needed, 
+	# but simple mode usually means "No grouping". 
+	# To keep state consistent, we will just use the flat data logic but render without folders.
+	# But wait, logic "Depth > 0" uses data_dict. Logic "No Grouping" is basically flat list.
+	# To persist selection we need to look up in the data structure that is currently active or a unified one.
+	# For simplicity, if Grouping is OFF, we iterate all_paths and check a "global set" or just the data_dict for keys.
+	# Let's assume folder_data populated with depth-logic or simple logic. 
+	
+	# Actually, the requirement was "Group by Folder off". 
+	# Let's map check state from folder_data (using parent dir logic)
+	
+	for path in all_paths:
+		var is_checked = false
+		# Look up in data_dict (which is built based on Depth)
+		# If Depth logic was active, keys exist.
+		# But if Grouping is toggled OFF, we need to know check state.
+		# Let's check against the `folder_data` assuming it was built for the current state.
+		var dir = _get_group_dir_for_path(path, 0 if (item_type == "script" and group_depth == 0) or (item_type == "scene" and scene_group_depth == 0) else 1)
+		# This is getting complex to share state between modes.
+		# Simplification: We look into folder_data searching for the path in any folder.
+		for d in data_dict:
+			if data_dict[d].has("items") and data_dict[d]["items"].has(path):
+				is_checked = data_dict[d]["items"][path]["is_checked"]
+				break
+				
 		var checkbox = "☑ " if is_checked else "☐ "
-		scene_list.add_item(checkbox + path.replace("res://", ""))
-		var idx = scene_list.get_item_count() - 1
-		scene_list.set_item_metadata(idx, path)
+		list.add_item(checkbox + path.replace("res://", ""))
+		var idx = list.get_item_count() - 1
+		list.set_item_metadata(idx, {"mode": "simple", "type": "file", "path": path, "item_type": item_type})
 
 #endregion
 
@@ -493,6 +882,15 @@ func _on_manage_formats_pressed() -> void:
 		
 	format_manager_dialog.popup_centered()
 
+func _on_advanced_settings_pressed() -> void:
+	if not is_instance_valid(advanced_settings_dialog):
+		_create_advanced_settings_dialog()
+	advanced_settings_dialog.popup_centered()
+
+func _on_include_addons_toggled(pressed: bool) -> void:
+	include_addons = pressed
+	_scan_and_refresh()
+
 func _on_format_dialog_ok() -> void:
 	collapsible_formats.clear()
 	for child in formats_list_vbox.get_children():
@@ -504,62 +902,187 @@ func _on_format_dialog_ok() -> void:
 			collapsible_formats.append(text)
 	format_manager_dialog.hide()
 
-func _on_script_item_clicked(index: int, at_position: Vector2, mouse_button_index: int) -> void:
+# --- Common Click Logic ---
+
+func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_button_index: int, 
+						tree_dict: Dictionary, flat_dict: Dictionary, is_tree_mode: bool, 
+						refresh_callback: Callable, toggle_tree_cb: Callable, toggle_flat_cb: Callable) -> void:
+	
 	if mouse_button_index != MOUSE_BUTTON_LEFT: return
-	var meta = script_list.get_item_metadata(index)
+	var meta = list.get_item_metadata(index)
 	if meta.is_empty(): return
 
-	if meta["type"] == "folder":
-		var dir = meta["dir"]
-		# Click left side (arrow) to toggle expand, right side (checkbox) to select all
-		if at_position.x < 20: 
-			folder_data[dir].is_expanded = not folder_data[dir].is_expanded
-		else:
-			folder_data[dir].is_checked = not folder_data[dir].is_checked
-			for script_path in folder_data[dir].scripts:
-				folder_data[dir].scripts[script_path].is_checked = folder_data[dir].is_checked
-	
-	elif meta["type"] == "script":
+	if is_tree_mode and meta["mode"] == "tree":
 		var path = meta["path"]
-		var dir = path.get_base_dir()
-		folder_data[dir].scripts[path].is_checked = not folder_data[dir].scripts[path].is_checked
+		var node = tree_dict[path]
 		
-		# Update folder checkbox state if all children match
-		if group_by_folder:
-			var all_checked = true
-			for s_path in folder_data[dir].scripts:
-				if not folder_data[dir].scripts[s_path].is_checked:
-					all_checked = false; break
-			folder_data[dir].is_checked = all_checked
+		# Heuristic for click position
+		var depth = 0
+		var p = node["parent"]
+		while p != "":
+			depth += 1
+			p = tree_dict[p]["parent"]
 			
-	_render_script_list()
+		var indent_offset = depth * 25
+		var arrow_zone = indent_offset + 20
+		var checkbox_zone_start = arrow_zone
+		
+		if node["type"] == "folder":
+			if at_position.x < checkbox_zone_start:
+				node["is_expanded"] = not node["is_expanded"]
+			else:
+				toggle_tree_cb.call(path, not node["is_checked"])
+		else:
+			toggle_tree_cb.call(path, not node["is_checked"])
+			
+	elif meta["mode"] == "flat":
+		if meta["type"] == "folder":
+			var dir = meta["dir"]
+			if at_position.x < 20: 
+				flat_dict[dir].is_expanded = not flat_dict[dir].is_expanded
+			else:
+				flat_dict[dir].is_checked = not flat_dict[dir].is_checked
+				for path in flat_dict[dir].items:
+					flat_dict[dir].items[path].is_checked = flat_dict[dir].is_checked
+		
+		elif meta["type"] == "file":
+			var path = meta["path"]
+			# Find which dir contains this
+			var found_dir = ""
+			for d in flat_dict:
+				if flat_dict[d].items.has(path):
+					found_dir = d; break
+			
+			if found_dir != "":
+				flat_dict[found_dir].items[path].is_checked = not flat_dict[found_dir].items[path].is_checked
+				# Update folder check
+				var all_checked = true
+				for s_path in flat_dict[found_dir].items:
+					if not flat_dict[found_dir].items[s_path].is_checked:
+						all_checked = false; break
+				flat_dict[found_dir].is_checked = all_checked
+				
+	elif meta["mode"] == "simple":
+		# Simple Flat
+		var path = meta["path"]
+		# Update in flat_dict to persist state
+		for d in flat_dict:
+			if flat_dict[d].items.has(path):
+				flat_dict[d].items[path].is_checked = not flat_dict[d].items[path].is_checked
+
+	refresh_callback.call()
+
+# --- Script Event Handlers ---
+
+func _on_script_item_clicked(index: int, at_position: Vector2, mouse_button_index: int) -> void:
+	_handle_item_click(script_list, index, at_position, mouse_button_index, 
+		tree_nodes, folder_data, group_depth == 0, 
+		_render_script_list, _toggle_script_tree_checkbox, Callable())
+
+func _toggle_script_tree_checkbox(path: String, new_state: bool) -> void:
+	_toggle_generic_tree_checkbox(path, new_state, tree_nodes)
 
 func _on_group_by_folder_toggled(pressed: bool) -> void:
 	group_by_folder = pressed
+	if is_instance_valid(group_depth_spinbox):
+		group_depth_spinbox.editable = pressed
+		group_depth_spinbox.modulate.a = 1.0 if pressed else 0.5
+	
+	if is_instance_valid(expand_all_scripts_button):
+		expand_all_scripts_button.disabled = not pressed
+		collapse_all_scripts_button.disabled = not pressed
+
+	_build_script_data_model()
+	_render_script_list()
+
+func _on_expand_collapse_scripts(do_expand: bool) -> void:
+	_expand_collapse_generic(do_expand, group_depth == 0, tree_nodes, folder_data)
 	_render_script_list()
 
 func _on_select_all_scripts_toggled() -> void:
 	var is_checked = select_all_scripts_checkbox.button_pressed
-	for dir in folder_data:
-		folder_data[dir].is_checked = is_checked
-		for script_path in folder_data[dir].scripts:
-			folder_data[dir].scripts[script_path].is_checked = is_checked
+	if group_depth == 0:
+		_toggle_generic_tree_checkbox("res://", is_checked, tree_nodes)
+	else:
+		_select_all_flat(is_checked, folder_data)
 	_render_script_list()
 
-func _on_scene_item_clicked(index: int, _at_pos: Vector2, _mouse_btn: int) -> void:
-	var path = scene_list.get_item_metadata(index)
-	if checked_scene_paths.has(path): 
-		checked_scene_paths.erase(path)
-	else: 
-		checked_scene_paths.append(path)
+# --- Scene Event Handlers ---
+
+func _on_scene_item_clicked(index: int, at_position: Vector2, mouse_button_index: int) -> void:
+	# Using the same generic handler
+	_handle_item_click(scene_list, index, at_position, mouse_button_index,
+		scene_tree_nodes, scene_folder_data, scene_group_depth == 0,
+		_render_scene_list, _toggle_scene_tree_checkbox, Callable())
+
+func _toggle_scene_tree_checkbox(path: String, new_state: bool) -> void:
+	_toggle_generic_tree_checkbox(path, new_state, scene_tree_nodes)
+
+func _on_scene_group_by_folder_toggled(pressed: bool) -> void:
+	scene_group_by_folder = pressed
+	if is_instance_valid(scene_group_depth_spinbox):
+		scene_group_depth_spinbox.editable = pressed
+		scene_group_depth_spinbox.modulate.a = 1.0 if pressed else 0.5
+	
+	if is_instance_valid(scene_expand_all_button):
+		scene_expand_all_button.disabled = not pressed
+		scene_collapse_all_button.disabled = not pressed
+
+	_build_scene_data_model()
+	_render_scene_list()
+
+func _on_expand_collapse_scenes(do_expand: bool) -> void:
+	_expand_collapse_generic(do_expand, scene_group_depth == 0, scene_tree_nodes, scene_folder_data)
 	_render_scene_list()
 
 func _on_select_all_scenes_toggled() -> void:
 	var is_checked = select_all_scenes_checkbox.button_pressed
-	checked_scene_paths.clear()
-	if is_checked: 
-		checked_scene_paths = all_scene_paths.duplicate()
+	if scene_group_depth == 0:
+		_toggle_generic_tree_checkbox("res://", is_checked, scene_tree_nodes)
+	else:
+		_select_all_flat(is_checked, scene_folder_data)
 	_render_scene_list()
+
+# --- Generic Logic Implementations ---
+
+func _toggle_generic_tree_checkbox(path: String, new_state: bool, nodes: Dictionary) -> void:
+	if not nodes.has(path): return
+	var node = nodes[path]
+	
+	node["is_checked"] = new_state
+	if node["type"] == "folder":
+		for child in node["children"]:
+			_toggle_generic_tree_checkbox(child, new_state, nodes)
+			
+	_update_parent_check_state(node["parent"], nodes)
+
+func _update_parent_check_state(parent_path: String, nodes: Dictionary) -> void:
+	if parent_path == "" or not nodes.has(parent_path): return
+	
+	var parent = nodes[parent_path]
+	var all_checked = true
+	for child in parent["children"]:
+		if not nodes[child]["is_checked"]:
+			all_checked = false; break
+	
+	if parent["is_checked"] != all_checked:
+		parent["is_checked"] = all_checked
+		_update_parent_check_state(parent["parent"], nodes)
+
+func _expand_collapse_generic(do_expand: bool, is_tree: bool, tree_dict: Dictionary, flat_dict: Dictionary) -> void:
+	if is_tree:
+		for path in tree_dict:
+			if tree_dict[path]["type"] == "folder":
+				tree_dict[path]["is_expanded"] = do_expand
+	else:
+		for dir in flat_dict:
+			flat_dict[dir]["is_expanded"] = do_expand
+
+func _select_all_flat(is_checked: bool, flat_dict: Dictionary) -> void:
+	for dir in flat_dict:
+		flat_dict[dir].is_checked = is_checked
+		for path in flat_dict[dir].items:
+			flat_dict[dir].items[path].is_checked = is_checked
 
 #endregion
 
@@ -569,7 +1092,9 @@ func _on_select_all_scenes_toggled() -> void:
 
 func _export_selected(to_clipboard: bool) -> void:
 	var selected_scripts = _get_selected_script_paths()
-	var selected_scenes = checked_scene_paths.duplicate()
+	var selected_scenes = _get_selected_scene_paths()
+	
+	selected_scripts.sort()
 	selected_scenes.sort()
 
 	# Validate selection
@@ -636,17 +1161,12 @@ func _set_status_message(text: String, color: Color) -> void:
 func _get_project_autoloads() -> Dictionary:
 	var result = {"scripts": [], "scenes": []}
 	
-	# Autoloads are stored as properties named "autoload/Name"
 	for prop in ProjectSettings.get_property_list():
 		var name = prop.name
 		if name.begins_with("autoload/"):
 			var path = ProjectSettings.get_setting(name)
-			
-			# Godot may prepend "*" to singletons
 			if path.begins_with("*"):
 				path = path.substr(1)
-				
-			# Check for both .gd and .cs
 			if path.ends_with(".gd") or path.ends_with(".cs"):
 				result["scripts"].append(path)
 			elif path.ends_with(".tscn"):
@@ -655,12 +1175,22 @@ func _get_project_autoloads() -> Dictionary:
 	return result
 
 func _get_selected_script_paths() -> Array[String]:
+	return _get_selected_paths_generic(group_depth == 0, tree_nodes, folder_data)
+
+func _get_selected_scene_paths() -> Array[String]:
+	return _get_selected_paths_generic(scene_group_depth == 0, scene_tree_nodes, scene_folder_data)
+
+func _get_selected_paths_generic(is_tree: bool, tree_dict: Dictionary, flat_dict: Dictionary) -> Array[String]:
 	var selected: Array[String] = []
-	for dir in folder_data:
-		for script_path in folder_data[dir].scripts:
-			if folder_data[dir].scripts[script_path].is_checked:
-				selected.append(script_path)
-	selected.sort()
+	if is_tree:
+		for path in tree_dict:
+			if tree_dict[path]["type"] == "file" and tree_dict[path]["is_checked"]:
+				selected.append(path)
+	else:
+		for dir in flat_dict:
+			for path in flat_dict[dir].items:
+				if flat_dict[dir].items[path].is_checked:
+					selected.append(path)
 	return selected
 
 #endregion
@@ -671,15 +1201,12 @@ func _get_selected_script_paths() -> Array[String]:
 
 func _build_project_godot_content() -> String:
 	var content = ""
-	
-	# --- [application] ---
 	content += "[application]\n"
 	
 	var app_name = ProjectSettings.get_setting("application/config/name", "")
 	if not app_name.is_empty():
 		content += 'config/name="%s"\n' % app_name
 	
-	# Main Scene (convert UID -> res://)
 	var main_scene = ProjectSettings.get_setting("application/run/main_scene", "")
 	if not main_scene.is_empty():
 		if main_scene.begins_with("uid://"):
@@ -689,7 +1216,6 @@ func _build_project_godot_content() -> String:
 		content += 'run/main_scene="%s"\n' % main_scene
 	content += "\n"
 
-	# --- [autoload] ---
 	var autoloads = _get_project_settings_section("autoload")
 	if not autoloads.is_empty():
 		content += "[autoload]\n"
@@ -697,7 +1223,6 @@ func _build_project_godot_content() -> String:
 			content += '%s="%s"\n' % [key, autoloads[key]]
 		content += "\n"
 
-	# --- [global_group] ---
 	var groups = _get_project_settings_section("global_group")
 	if not groups.is_empty():
 		content += "[global_group]\n"
@@ -705,11 +1230,8 @@ func _build_project_godot_content() -> String:
 			content += '%s="%s"\n' % [key, groups[key]]
 		content += "\n"
 		
-	# --- [layer_names] ---
 	var layers = _get_project_settings_section("layer_names")
 	var active_layers = {}
-	
-	# Filter empty layers
 	for key in layers:
 		if not layers[key].is_empty():
 			active_layers[key] = layers[key]
@@ -722,7 +1244,6 @@ func _build_project_godot_content() -> String:
 			content += '%s="%s"\n' % [key, active_layers[key]]
 		content += "\n"
 
-	# --- [input] ---
 	var input_section = _generate_clean_input_section()
 	if input_section.strip_edges() != "[input]":
 		content += input_section + "\n"
@@ -756,11 +1277,9 @@ func _build_scripts_content(paths: Array, use_markdown_override = null) -> Strin
 			var file_content = file.get_as_text()
 			content += "--- SCRIPT: " + file_path + " ---\n\n"
 			if do_wrap:
-				# Detect language for markdown
 				var lang_tag = "gdscript"
 				if file_path.ends_with(".cs"):
 					lang_tag = "csharp"
-				
 				content += "```" + lang_tag + "\n" + file_content + "\n```\n\n"
 			else:
 				content += file_content + "\n\n"
@@ -796,13 +1315,11 @@ func _build_tree_string_for_scene(root_node: Node) -> String:
 	var root_line = _get_node_info_string(root_node)
 	var scene_path = root_node.get_scene_file_path()
 	
-	# Stop recursion if scene format matches collapsible types
 	if collapse_instanced_scenes and _path_ends_with_collapsible_format(scene_path):
 		return root_line
 	
 	var children_lines: Array[String] = []
 	
-	# 1. Root Signals
 	var signal_strings = _get_node_signals(root_node)
 	var real_children = root_node.get_children()
 	var has_signals = not signal_strings.is_empty()
@@ -812,7 +1329,6 @@ func _build_tree_string_for_scene(root_node: Node) -> String:
 		var is_last_item = not has_children
 		children_lines.append(_format_signals_block(signal_strings, "", is_last_item))
 
-	# 2. Root Children
 	for i in range(real_children.size()):
 		var child = real_children[i]
 		var is_last = (i == real_children.size() - 1)
@@ -838,12 +1354,10 @@ func _build_tree_recursive_helper(node: Node, prefix: String, is_last: bool) -> 
 	var has_signals = not signal_strings.is_empty()
 	var has_children = not real_children.is_empty()
 	
-	# Signals as pseudo-child
 	if has_signals:
 		var signals_is_last = not has_children 
 		children_lines.append(_format_signals_block(signal_strings, child_prefix, signals_is_last))
 	
-	# Recursive Children
 	for i in range(real_children.size()):
 		var child = real_children[i]
 		var is_last_child = (i == real_children.size() - 1)
@@ -877,10 +1391,7 @@ func _generate_clean_input_section() -> String:
 	
 	for prop_name in input_props:
 		var action_name = prop_name.trim_prefix("input/")
-		
-		# Exclude default Godot UI actions
-		if action_name.begins_with("ui_"):
-			continue
+		if action_name.begins_with("ui_"): continue
 			
 		var setting = ProjectSettings.get_setting(prop_name)
 		
@@ -919,7 +1430,6 @@ func _format_input_event(event: InputEvent) -> String:
 		return "MouseBtn(%s)" % btn_name
 		
 	elif event is InputEventJoypadButton:
-		# Mapping generic names to common controller buttons
 		var btn_name = str(event.button_index)
 		match event.button_index:
 			JOY_BUTTON_A: btn_name = "A"
@@ -1091,7 +1601,7 @@ func _path_ends_with_collapsible_format(path: String) -> bool:
 
 func _find_files_recursive(path: String, extension: String) -> Array[String]:
 	var files: Array[String] = []
-	if path.begins_with("res://addons"): return files
+	if not include_addons and path.begins_with("res://addons"): return files
 	
 	var dir = DirAccess.open(path)
 	if dir:
