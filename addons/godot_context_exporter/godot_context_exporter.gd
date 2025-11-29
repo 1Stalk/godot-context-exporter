@@ -1517,7 +1517,10 @@ func _export_selected(to_clipboard: bool) -> void:
 	
 	# Finalize
 	var total_lines = content_text.split("\n").size()
-	var stats_line = "\nTotal: %d lines, %d characters" % [total_lines, content_text.length()]
+	var total_chars = content_text.length()
+	var approx_tokens = _estimate_tokens(content_text)
+	
+	var stats_line = "\nTotal: %d lines, %d characters (~%d tokens)" % [total_lines, total_chars, approx_tokens]
 	
 	var items_str = "%d script(s), %d scene(s)" % [selected_scripts.size(), selected_scenes.size()]
 	if include_project_godot: items_str += ", project.godot"
@@ -1573,6 +1576,11 @@ func _get_selected_paths_generic(is_tree: bool, tree_dict: Dictionary, flat_dict
 				if flat_dict[dir].items[path].is_checked:
 					selected.append(path)
 	return selected
+
+func _estimate_tokens(text: String) -> int:
+	if text.is_empty():
+		return 0
+	return maxi(1, int(text.length() / 4.0))
 
 #endregion
 
