@@ -11,7 +11,7 @@ Godot 4 plugin that exports selected GDScript files, Scene trees, and Project Se
 ![Screenshot](visuals/4.png)
 
 ## Features
-*   📂 **Scripts:** Batch export `.gd` files (optionally grouped by folder).
+*   📂 **Scripts:** Batch export `.gd` or `.cs` files (optionally grouped by folder).
 *   🌳 **Scenes:** Text-based visualization of Scene trees (includes Nodes, Signals, Groups, and Inspector changes).
 *   ⚙️ **Settings:** Includes `project.godot`, Autoloads (Globals), and cleaned-up Input Map.
 *   🤖 **LLM Ready:** Optional Markdown formatting (code blocks) for better parsing by AI.
