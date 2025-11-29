@@ -1,13 +1,15 @@
 @tool
 extends EditorPlugin
 
+## Context Exporter Plugin
+##
 ## Exports selected GDScript/C# files, Scene trees, and Project Settings into a single text file or clipboard.
-## useful for sharing context with LLMs or documentation.
+## Designed specifically to generate compact, context-rich documentation for LLMs (ChatGPT, Claude, etc.).
 
 #region Constants & Configuration
 #-----------------------------------------------------------------------------
 
-# Colors for UI feedback
+# UI Colors (Dark theme optimized)
 const COLOR_SAVE_BTN = Color("#2e6b2e")
 const COLOR_SAVE_TEXT = Color("#46a946")
 const COLOR_COPY_BTN = Color("#2e6b69")
@@ -15,20 +17,38 @@ const COLOR_COPY_TEXT = Color("#4ab4b1")
 const COLOR_ERROR = Color("#b83b3b")
 const COLOR_WARNING = Color("#d4a53a")
 const COLOR_ACCENT = Color("#7ca6e2")
+const INFO_ICON_COLOR = Color("6da7d4ff")
 
-# Default styles
+# Layout constants
+const INFO_ICON_SIZE = 18
+const INFO_ICON_GAP = 0
+const TOOLBAR_ICON_SIZE = Vector2i(18, 18)
+
+# Icon resources
+const ICON_PATH_PNG = "res://addons/godot_context_exporter/icons/context_exporter.png"
+const ICON_PATH_SVG = "res://addons/godot_context_exporter/icons/context_exporter.svg"
+
+# Configuration defaults
+# These formats are treated as single assets rather than deep node trees to save context window space.
+const DEFAULT_COLLAPSIBLE_FORMATS = [".blend", ".gltf", ".glb", ".obj", ".fbx"]
+const SETTING_FORMATS_PATH = "context_exporter/collapsible_formats"
+const SETTING_SHOW_BUTTON_PATH = "context_exporter/show_editor_button"
+
+# Styling constants
 const THEME_BG_COLOR = Color("#232323")
 const THEME_LIST_BG = Color("#2c3036")
 
 #endregion
 
 
-#region UI Variables
+#region UI References
 #-----------------------------------------------------------------------------
+# Main references
 var window: Window
 var status_label: Label
+var toolbar_button: Button
 
-# Scripts Tab UI
+# Script Tab Controls
 var script_list: ItemList
 var select_all_scripts_checkbox: CheckBox
 var group_by_folder_checkbox: CheckBox
@@ -37,7 +57,7 @@ var group_depth_spinbox: SpinBox
 var expand_all_scripts_button: Button
 var collapse_all_scripts_button: Button
 
-# Scenes Tab UI
+# Scene Tab Controls
 var scene_list: ItemList
 var select_all_scenes_checkbox: CheckBox
 var include_inspector_checkbox: CheckBox
@@ -48,11 +68,9 @@ var scene_group_depth_spinbox: SpinBox
 var scene_expand_all_button: Button
 var scene_collapse_all_button: Button
 
-# Format Manager (Popup)
+# Popups
 var format_manager_dialog: Window
 var formats_list_vbox: VBoxContainer
-
-# Advanced Settings (Popup)
 var advanced_settings_dialog: Window
 
 #endregion
@@ -61,37 +79,37 @@ var advanced_settings_dialog: Window
 #region State Variables
 #-----------------------------------------------------------------------------
 
-# Script State
+# Script Selection State
 var group_by_folder: bool = true
-var group_depth: int = 0 # 0 = Auto/Tree, 1+ = Flat depth
+var group_depth: int = 0         # 0 = Recursive Tree (File system view), 1+ = Flat depth level
 var wrap_in_markdown: bool = false
 var all_script_paths: Array[String] = []
-var folder_data: Dictionary = {} # For flat grouping
-var tree_nodes: Dictionary = {}  # For recursive tree (depth 0)
+var folder_data: Dictionary = {} # Stores data when using flat/depth grouping
+var tree_nodes: Dictionary = {}  # Stores data when using recursive tree view
 
-# Scene State
+# Scene Selection State
 var scene_group_by_folder: bool = true
-var scene_group_depth: int = 0 # 0 = Auto/Tree, 1+ = Flat depth
+var scene_group_depth: int = 0
 var all_scene_paths: Array[String] = []
-# var checked_scene_paths: Array[String] = [] # Not used anymore
-var scene_folder_data: Dictionary = {} # For flat grouping
-var scene_tree_nodes: Dictionary = {}  # For recursive tree (depth 0)
+var scene_folder_data: Dictionary = {}
+var scene_tree_nodes: Dictionary = {}
 
+# Export Options
 var include_inspector_changes: bool = false
 var wrap_scene_in_markdown: bool = false
 var collapse_instanced_scenes: bool = false
-var collapsible_formats: Array[String] = [".blend", ".gltf", ".glb", ".obj", ".fbx"]
+var merge_similar_nodes: bool = false
+var collapsible_formats: Array = DEFAULT_COLLAPSIBLE_FORMATS.duplicate()
 
-# Project Settings State
+# Project Settings & Globals
 var include_project_godot: bool = false
 var wrap_project_godot_in_markdown: bool = false
-
-# Autoloads State
 var include_autoloads: bool = true
 var wrap_autoloads_in_markdown: bool = true
 
-# Advanced Settings State
-var include_addons: bool = false
+# Advanced Configuration
+var include_addons: bool = false # Scanning addons folder is heavy, disabled by default
+var show_editor_button: bool = true
 
 #endregion
 
@@ -100,11 +118,24 @@ var include_addons: bool = false
 #-----------------------------------------------------------------------------
 
 func _enter_tree() -> void:
+	# Add a menu item in Project -> Tools as a fallback access point
 	add_tool_menu_item("Context Exporter...", Callable(self, "open_window"))
+	
+	_load_config()
 	_setup_ui()
+	
+	# Only add the toolbar shortcut if enabled in settings
+	if show_editor_button:
+		_add_toolbar_button()
 
 func _exit_tree() -> void:
 	remove_tool_menu_item("Context Exporter...")
+	
+	# Clean up UI elements to prevent memory leaks or editor errors
+	if is_instance_valid(toolbar_button):
+		remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, toolbar_button)
+		toolbar_button.queue_free()
+	
 	if is_instance_valid(window):
 		window.queue_free()
 	if is_instance_valid(format_manager_dialog):
@@ -118,15 +149,53 @@ func _exit_tree() -> void:
 #region UI Construction
 #-----------------------------------------------------------------------------
 
+#region UI Construction
+#-----------------------------------------------------------------------------
+
+## Creates and places the button in the main Godot Editor toolbar (top right).
+func _add_toolbar_button() -> void:
+	toolbar_button = Button.new()
+	toolbar_button.text = "Context"
+	toolbar_button.tooltip_text = "Open Godot Context Exporter"
+	toolbar_button.flat = true
+	toolbar_button.focus_mode = Control.FOCUS_NONE
+	# Connect the click signal to the open_window function
+	toolbar_button.pressed.connect(open_window)
+	
+	# Attempt to load custom icons (PNG or SVG) to make the button look integrated.
+	var raw_icon: Texture2D = null
+	if FileAccess.file_exists(ICON_PATH_PNG):
+		raw_icon = load(ICON_PATH_PNG)
+	elif FileAccess.file_exists(ICON_PATH_SVG):
+		raw_icon = load(ICON_PATH_SVG)
+	
+	if raw_icon:
+		# Resize the icon for consistency with standard editor toolbar icons (usually 16x16 or 18x18).
+		var image = raw_icon.get_image()
+		image.resize(TOOLBAR_ICON_SIZE.x, TOOLBAR_ICON_SIZE.y, Image.INTERPOLATE_CUBIC)
+		toolbar_button.icon = ImageTexture.create_from_image(image)
+	else:
+		# Fallback: Use the default built-in "Script" icon from the Editor's theme if custom icon fails.
+		var editor_base = get_editor_interface().get_base_control()
+		if editor_base.has_theme_icon("Script", "EditorIcons"):
+			toolbar_button.icon = editor_base.get_theme_icon("Script", "EditorIcons")
+	
+	# Add the button to the specific editor container (The top toolbar).
+	add_control_to_container(EditorPlugin.CONTAINER_TOOLBAR, toolbar_button)
+
+## Main initialization for the popup window and high-level layout.
 func _setup_ui() -> void:
+	# Create the main popup window as a standard Window node.
 	window = Window.new()
 	window.title = "Godot Context Exporter"
 	window.min_size = Vector2i(600, 750)
 	window.size = Vector2i(700, 850)
 	window.visible = false
 	window.wrap_controls = true
+	# Hiding the window instead of freeing it allows us to preserve state (checkbox selections) between opens.
 	window.close_requested.connect(window.hide)
 
+	# Main layout container: A PanelContainer to provide a background color.
 	var root_panel = PanelContainer.new()
 	var main_style = StyleBoxFlat.new()
 	main_style.bg_color = THEME_BG_COLOR
@@ -134,6 +203,7 @@ func _setup_ui() -> void:
 	root_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	window.add_child(root_panel)
 
+	# Add margins so elements don't touch the window edges.
 	var margin = MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	margin.add_theme_constant_override("margin_left", 15)
@@ -142,37 +212,64 @@ func _setup_ui() -> void:
 	margin.add_theme_constant_override("margin_bottom", 10)
 	root_panel.add_child(margin)
 	
+	# Vertical box to stack the Tabs (top) and Footer controls (bottom).
 	var main_vbox = VBoxContainer.new()
 	main_vbox.add_theme_constant_override("separation", 15)
 	margin.add_child(main_vbox)
 
-	# Tabs
-	var tab_container = TabContainer.new()
-	tab_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	main_vbox.add_child(tab_container)
+	# --- Tab System ---
+	# We use a Control wrapper here to allow us to "float" a button on top of the tab bar area later.
+	var tabs_wrapper = Control.new()
+	tabs_wrapper.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main_vbox.add_child(tabs_wrapper)
 
+	var tab_container = TabContainer.new()
+	tab_container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tabs_wrapper.add_child(tab_container)
+
+	# Build and add the two main tabs
 	tab_container.add_child(_create_scripts_tab())
 	tab_container.set_tab_title(0, "Scripts")
 	
 	tab_container.add_child(_create_scenes_tab())
 	tab_container.set_tab_title(1, "Scenes")
 	
+	# --- Advanced Settings Button ---
+	# We manually position this button at the Top-Right of the wrapper to make it look like 
+	# it belongs to the tab bar, saving vertical space.
+	var adv_btn = Button.new()
+	adv_btn.text = "Advanced Settings"
+	adv_btn.flat = true
+	adv_btn.add_theme_color_override("font_color", COLOR_ACCENT)
+	adv_btn.pressed.connect(_on_advanced_settings_pressed)
+	adv_btn.focus_mode = Control.FOCUS_NONE
+	
+	tabs_wrapper.add_child(adv_btn)
+	adv_btn.layout_mode = 1 # Set to Anchors mode
+	adv_btn.anchors_preset = Control.PRESET_TOP_RIGHT
+	adv_btn.offset_right = -5
+	adv_btn.offset_top = 0
+	
+	# Build the bottom section (Save/Copy buttons and project settings).
 	_create_footer_controls(main_vbox)
 	
-	# Add window to the editor
+	# Attach the floating window to the editor's base control so it renders correctly within the OS context.
 	get_editor_interface().get_base_control().add_child(window)
 
+## Constructs the content of the "Scripts" tab.
 func _create_scripts_tab() -> Control:
 	var vbox = VBoxContainer.new()
 	vbox.name = "ScriptsTab"
 	vbox.add_theme_constant_override("separation", 10)
 
+	# 1. Header Label
 	var scripts_label = RichTextLabel.new()
 	scripts_label.bbcode_enabled = true
 	scripts_label.text = "[b][color=#d5eaf2]Select Scripts to Export:[/color][/b]"
 	scripts_label.fit_content = true
 	vbox.add_child(scripts_label)
 	
+	# 2. Controls Toolbar (Select All | Grouping | Depth | Expand/Collapse)
 	var options_hbox = HBoxContainer.new()
 	vbox.add_child(options_hbox)
 
@@ -190,7 +287,7 @@ func _create_scripts_tab() -> Control:
 	group_by_folder_checkbox.toggled.connect(_on_group_by_folder_toggled)
 	options_hbox.add_child(group_by_folder_checkbox)
 	
-	# Settings Depth
+	# Depth Control (SpinBox to flatten the folder structure at a certain level)
 	var depth_hbox = HBoxContainer.new()
 	options_hbox.add_child(depth_hbox)
 	
@@ -206,7 +303,7 @@ func _create_scripts_tab() -> Control:
 	group_depth_spinbox.tooltip_text = depth_label.tooltip_text
 	group_depth_spinbox.editable = true
 	group_depth_spinbox.modulate.a = 1.0
-	
+	# Connect value change to rebuild the model immediately
 	group_depth_spinbox.value_changed.connect(func(val): 
 		group_depth = int(val)
 		_build_script_data_model()
@@ -214,11 +311,11 @@ func _create_scripts_tab() -> Control:
 	)
 	depth_hbox.add_child(group_depth_spinbox)
 	
-	# Buttons
 	options_hbox.add_child(VSeparator.new())
 	
 	expand_all_scripts_button = Button.new()
 	expand_all_scripts_button.text = "Expand All"
+	# Use bind(true) to reuse one function for both expand and collapse
 	expand_all_scripts_button.pressed.connect(_on_expand_collapse_scripts.bind(true))
 	options_hbox.add_child(expand_all_scripts_button)
 	
@@ -227,36 +324,53 @@ func _create_scripts_tab() -> Control:
 	collapse_all_scripts_button.pressed.connect(_on_expand_collapse_scripts.bind(false))
 	options_hbox.add_child(collapse_all_scripts_button)
 	
+	# 3. The Main File List
 	var list_panel = _create_list_panel()
 	list_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(list_panel)
 	
 	script_list = ItemList.new()
 	script_list.select_mode = ItemList.SELECT_SINGLE
-	script_list.allow_reselect = true
+	script_list.allow_reselect = true # Required to allow toggling checkboxes on click
 	script_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	script_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	script_list.item_clicked.connect(_on_script_item_clicked)
 	list_panel.add_child(script_list)
 
+	# 4. Tab Footer (Format options specific to Scripts)
+	var options_grid = GridContainer.new()
+	options_grid.columns = 2
+	options_grid.add_theme_constant_override("h_separation", 20)
+	options_grid.add_theme_constant_override("v_separation", 5)
+	vbox.add_child(options_grid)
+
+	var markdown_hbox = HBoxContainer.new()
+	markdown_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	markdown_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(markdown_hbox)
+
 	wrap_in_markdown_checkbox = CheckBox.new()
-	wrap_in_markdown_checkbox.text = "Wrap code in Markdown (```gdscript``` / ```csharp```)"
+	wrap_in_markdown_checkbox.text = "Use Markdown (```gdscript``` / ```csharp```)"
 	wrap_in_markdown_checkbox.toggled.connect(func(p): wrap_in_markdown = p)
-	vbox.add_child(wrap_in_markdown_checkbox)
+	markdown_hbox.add_child(wrap_in_markdown_checkbox)
 	
 	return vbox
-	
+
+## Constructs the content of the "Scenes" tab. 
+## Similar to Scripts tab but with extra Scene-specific processing options.
 func _create_scenes_tab() -> Control:
 	var vbox = VBoxContainer.new()
 	vbox.name = "ScenesTab"
 	vbox.add_theme_constant_override("separation", 10)
 
+	# Header
 	var scenes_label = RichTextLabel.new()
 	scenes_label.bbcode_enabled = true
 	scenes_label.text = "[b][color=#d5eaf2]Select Scenes to Export:[/color][/b]"
 	scenes_label.fit_content = true
 	vbox.add_child(scenes_label)
 
+	# Toolbar
 	var options_hbox = HBoxContainer.new()
 	vbox.add_child(options_hbox)
 
@@ -274,7 +388,6 @@ func _create_scenes_tab() -> Control:
 	scene_group_by_folder_checkbox.toggled.connect(_on_scene_group_by_folder_toggled)
 	options_hbox.add_child(scene_group_by_folder_checkbox)
 
-	# Scene Depth Settings
 	var depth_hbox = HBoxContainer.new()
 	options_hbox.add_child(depth_hbox)
 	
@@ -290,7 +403,6 @@ func _create_scenes_tab() -> Control:
 	scene_group_depth_spinbox.tooltip_text = depth_label.tooltip_text
 	scene_group_depth_spinbox.editable = true
 	scene_group_depth_spinbox.modulate.a = 1.0
-	
 	scene_group_depth_spinbox.value_changed.connect(func(val): 
 		scene_group_depth = int(val)
 		_build_scene_data_model()
@@ -298,7 +410,6 @@ func _create_scenes_tab() -> Control:
 	)
 	depth_hbox.add_child(scene_group_depth_spinbox)
 
-	# Buttons
 	options_hbox.add_child(VSeparator.new())
 	
 	scene_expand_all_button = Button.new()
@@ -311,53 +422,100 @@ func _create_scenes_tab() -> Control:
 	scene_collapse_all_button.pressed.connect(_on_expand_collapse_scenes.bind(false))
 	options_hbox.add_child(scene_collapse_all_button)
 	
-	# List
+	# The Main List
 	var list_panel = _create_list_panel()
 	list_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(list_panel)
 
 	scene_list = ItemList.new()
-	scene_list.select_mode = ItemList.SELECT_SINGLE # Use SINGLE, logic multi choose have its own
+	scene_list.select_mode = ItemList.SELECT_SINGLE 
 	scene_list.allow_reselect = true
 	scene_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scene_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scene_list.item_clicked.connect(_on_scene_item_clicked)
 	list_panel.add_child(scene_list)
 
-	# Extra Options
+	# Tab Footer (Scene Processing Options)
+	var options_grid = GridContainer.new()
+	options_grid.columns = 2
+	options_grid.add_theme_constant_override("h_separation", 20) 
+	options_grid.add_theme_constant_override("v_separation", 5)
+	vbox.add_child(options_grid)
+
+	# Option 1: Inspector Changes (Diffs)
+	var inspector_hbox = HBoxContainer.new()
+	inspector_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inspector_hbox.add_theme_constant_override("separation", INFO_ICON_GAP) 
+	options_grid.add_child(inspector_hbox)
+
 	include_inspector_checkbox = CheckBox.new()
-	include_inspector_checkbox.text = "Include non-default Inspector properties"
+	include_inspector_checkbox.text = "Show Inspector Changes"
 	include_inspector_checkbox.toggled.connect(func(p): include_inspector_changes = p)
-	vbox.add_child(include_inspector_checkbox)
+	inspector_hbox.add_child(include_inspector_checkbox)
 	
+	# Add an info icon with a tooltip explaining this complex feature
+	inspector_hbox.add_child(_create_info_icon(
+		"Shows properties modified in the Inspector that differ from defaults.\n" +
+		"Adds a 'changes' list to nodes, revealing tweaked values like Position, Scale, or Script Variables."
+	))
+
+	# Option 2: Merge Similar Nodes
+	var merge_hbox = HBoxContainer.new()
+	merge_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	merge_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(merge_hbox)
+	
+	var merge_checkbox = CheckBox.new()
+	merge_checkbox.text = "Merge Similar Nodes"
+	merge_checkbox.toggled.connect(func(p): merge_similar_nodes = p)
+	merge_hbox.add_child(merge_checkbox)
+	
+	merge_hbox.add_child(_create_info_icon(
+		"Detects adjacent duplicates (e.g. Enemy_1, Enemy_2, Enemy_3)\n" +
+		"and combines them into a single line (Enemy x3) to save space."
+	))
+
+	# Option 3: Markdown Wrapping
+	var markdown_hbox = HBoxContainer.new()
+	markdown_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	markdown_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(markdown_hbox)
+
+	wrap_scenes_in_markdown_checkbox = CheckBox.new()
+	wrap_scenes_in_markdown_checkbox.text = "Use Markdown (```text```)"
+	wrap_scenes_in_markdown_checkbox.toggled.connect(func(p): wrap_scene_in_markdown = p)
+	markdown_hbox.add_child(wrap_scenes_in_markdown_checkbox)
+
+	# Option 4: Simplify Imported Scenes (Collapsing .blend/.gltf files)
 	var collapse_hbox = HBoxContainer.new()
-	vbox.add_child(collapse_hbox)
+	collapse_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	collapse_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(collapse_hbox)
 	
 	collapse_scenes_checkbox = CheckBox.new()
-	collapse_scenes_checkbox.text = "Collapse Instanced Scenes by Format"
+	collapse_scenes_checkbox.text = "Simplify Imported Scenes"
 	collapse_scenes_checkbox.toggled.connect(func(p): collapse_instanced_scenes = p)
 	collapse_hbox.add_child(collapse_scenes_checkbox)
 	
-	var manage_formats_button = Button.new()
-	manage_formats_button.text = "Manage Formats..."
-	manage_formats_button.pressed.connect(_on_manage_formats_pressed)
-	collapse_hbox.add_child(manage_formats_button)
-
-	wrap_scenes_in_markdown_checkbox = CheckBox.new()
-	wrap_scenes_in_markdown_checkbox.text = "Wrap scene trees in Markdown (```text```)"
-	wrap_scenes_in_markdown_checkbox.toggled.connect(func(p): wrap_scene_in_markdown = p)
-	vbox.add_child(wrap_scenes_in_markdown_checkbox)
+	collapse_hbox.add_child(_create_info_icon(
+		"Treats complex imported files (like .blend, .gltf) as a single node line.\n" +
+		"Prevents hundreds of internal mesh nodes from cluttering your export.\n" +
+		"(You can configure extensions in Advanced Settings)"
+	))
 
 	return vbox
 
+## Creates the independent window for configuring Advanced Settings (filters and editor options).
 func _create_advanced_settings_dialog() -> void:
 	advanced_settings_dialog = Window.new()
 	advanced_settings_dialog.title = "Advanced Settings"
-	advanced_settings_dialog.min_size = Vector2i(300, 200)
-	advanced_settings_dialog.size = Vector2i(400, 250)
-	advanced_settings_dialog.close_requested.connect(advanced_settings_dialog.hide)
+	advanced_settings_dialog.min_size = Vector2i(400, 500)
+	advanced_settings_dialog.size = Vector2i(400, 500)
+	# Trigger the save logic when closing via 'x'
+	advanced_settings_dialog.close_requested.connect(_save_and_close_advanced_settings)
 	window.add_child(advanced_settings_dialog)
 	
+	# Background Styling
 	var bg_panel = PanelContainer.new()
 	var style = StyleBoxFlat.new()
 	style.bg_color = THEME_BG_COLOR
@@ -373,37 +531,123 @@ func _create_advanced_settings_dialog() -> void:
 	margin.add_theme_constant_override("margin_bottom", 15)
 	bg_panel.add_child(margin)
 	
-	var vbox = VBoxContainer.new()
-	margin.add_child(vbox)
+	var main_vbox = VBoxContainer.new()
+	main_vbox.add_theme_constant_override("separation", 15)
+	margin.add_child(main_vbox)
+	
+	# --- Section: Editor Integration ---
+	var integration_vbox = VBoxContainer.new()
+	main_vbox.add_child(integration_vbox)
+	
+	var int_label = Label.new()
+	int_label.text = "Editor Integration"
+	int_label.add_theme_color_override("font_color", COLOR_ACCENT)
+	integration_vbox.add_child(int_label)
+	
+	integration_vbox.add_child(HSeparator.new())
+	
+	var btn_checkbox = CheckBox.new()
+	btn_checkbox.text = "Show 'Context' button in toolbar"
+	btn_checkbox.button_pressed = show_editor_button
+	# We name this node so we can find it easily during the Save step
+	btn_checkbox.name = "ShowButtonCheckbox" 
+	integration_vbox.add_child(btn_checkbox)
+	
+	# --- Section: Scanning Options ---
+	var scan_vbox = VBoxContainer.new()
+	main_vbox.add_child(scan_vbox)
 	
 	var label = Label.new()
 	label.text = "Scanning Options"
 	label.add_theme_color_override("font_color", COLOR_ACCENT)
-	vbox.add_child(label)
+	scan_vbox.add_child(label)
 	
-	vbox.add_child(HSeparator.new())
+	scan_vbox.add_child(HSeparator.new())
 	
 	var addons_checkbox = CheckBox.new()
 	addons_checkbox.text = "Include 'addons/' folder content"
 	addons_checkbox.button_pressed = include_addons
 	addons_checkbox.toggled.connect(_on_include_addons_toggled)
-	vbox.add_child(addons_checkbox)
+	scan_vbox.add_child(addons_checkbox)
 	
 	var info_label = Label.new()
 	info_label.text = "Note: Including addons can significantly increase the list size."
 	info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	info_label.modulate = Color(1, 1, 1, 0.6)
-	vbox.add_child(info_label)
+	scan_vbox.add_child(info_label)
 	
-	var spacer = Control.new()
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	vbox.add_child(spacer)
+	# --- Section: Format Management ---
+	# This section allows users to define which extensions count as "collapsible" (e.g. .blend, .glb)
+	var fmt_vbox = VBoxContainer.new()
+	fmt_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL 
+	main_vbox.add_child(fmt_vbox)
 	
+	var fmt_label = Label.new()
+	fmt_label.text = "Collapsible Formats"
+	fmt_label.add_theme_color_override("font_color", COLOR_ACCENT)
+	fmt_vbox.add_child(fmt_label)
+	
+	fmt_vbox.add_child(HSeparator.new())
+	
+	var help_label = Label.new()
+	help_label.text = "Extensions to simplify (treat as single node):"
+	help_label.modulate = Color(1, 1, 1, 0.8)
+	fmt_vbox.add_child(help_label)
+	
+	# Scrollable List container for the formats
+	var scroll = ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var scroll_style = StyleBoxFlat.new()
+	scroll_style.bg_color = Color(0, 0, 0, 0.2)
+	scroll_style.set_corner_radius_all(4)
+	scroll.add_theme_stylebox_override("panel", scroll_style)
+	fmt_vbox.add_child(scroll)
+	
+	formats_list_vbox = VBoxContainer.new()
+	formats_list_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(formats_list_vbox)
+	
+	# Action Buttons (Add / Reset)
+	var buttons_hbox = HBoxContainer.new()
+	fmt_vbox.add_child(buttons_hbox)
+	
+	var add_btn = Button.new()
+	add_btn.text = "+ Add Extension"
+	add_btn.flat = true
+	add_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	add_btn.pressed.connect(func(): _add_format_row(""))
+	buttons_hbox.add_child(add_btn)
+	
+	var spacer_btn = Control.new()
+	spacer_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	buttons_hbox.add_child(spacer_btn)
+	
+	var reset_btn = Button.new()
+	reset_btn.text = "Reset to Defaults"
+	reset_btn.flat = true
+	reset_btn.add_theme_color_override("font_color", COLOR_WARNING)
+	reset_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	reset_btn.tooltip_text = "Restore original list: " + ", ".join(DEFAULT_COLLAPSIBLE_FORMATS)
+	reset_btn.pressed.connect(_on_reset_formats_pressed)
+	buttons_hbox.add_child(reset_btn)
+	
+	# Main Footer (Save)
 	var close_btn = Button.new()
-	close_btn.text = "Close"
-	close_btn.pressed.connect(advanced_settings_dialog.hide)
-	vbox.add_child(close_btn)
+	close_btn.text = "Save & Close"
+	close_btn.custom_minimum_size.y = 30
+	close_btn.pressed.connect(_save_and_close_advanced_settings)
+	main_vbox.add_child(close_btn)
 
+## Rebuilds the format list with the hardcoded default values.
+func _on_reset_formats_pressed() -> void:
+	for child in formats_list_vbox.get_children():
+		child.queue_free()
+	
+	for ext in DEFAULT_COLLAPSIBLE_FORMATS:
+		_add_format_row(ext)
+
+## Creates a sub-dialog (if needed independently) for managing formats.
+## Note: This is partly redundant with Advanced Settings but kept for modularity.
 func _create_format_manager_dialog() -> void:
 	format_manager_dialog = Window.new()
 	format_manager_dialog.title = "Manage Collapsible Formats"
@@ -458,22 +702,64 @@ func _create_format_manager_dialog() -> void:
 	cancel_button.pressed.connect(format_manager_dialog.hide)
 	buttons_hbox.add_child(cancel_button)
 
-func _add_format_row(format_text: String) -> void:
+## Helper: Adds a single editable row (LineEdit + Delete Button) to the formats list.
+func _add_format_row(text_value: String) -> void:
 	var hbox = HBoxContainer.new()
+	formats_list_vbox.add_child(hbox)
 	
 	var line_edit = LineEdit.new()
-	line_edit.placeholder_text = ".ext"
-	line_edit.text = format_text
+	line_edit.text = text_value
+	line_edit.placeholder_text = ".extension"
 	line_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	hbox.add_child(line_edit)
 	
-	var remove_button = Button.new()
-	remove_button.text = "Remove"
-	remove_button.pressed.connect(hbox.queue_free)
-	hbox.add_child(remove_button)
-	
-	formats_list_vbox.add_child(hbox)
+	var del_btn = Button.new()
+	del_btn.text = " × "
+	del_btn.modulate = COLOR_ERROR
+	del_btn.tooltip_text = "Remove"
+	# Connect directly to queue_free to remove the row without needing an index reference.
+	del_btn.pressed.connect(hbox.queue_free)
+	hbox.add_child(del_btn)
 
+## Reads the state of the Advanced Settings dialog, applies changes to global variables, and saves config.
+func _save_and_close_advanced_settings() -> void:
+	# 1. Update Button Visibility based on checkbox
+	var btn_checkbox = advanced_settings_dialog.find_child("ShowButtonCheckbox", true, false) as CheckBox
+	if btn_checkbox:
+		var new_show_state = btn_checkbox.button_pressed
+		
+		if new_show_state != show_editor_button:
+			show_editor_button = new_show_state
+			if show_editor_button:
+				if not is_instance_valid(toolbar_button):
+					_add_toolbar_button()
+			else:
+				if is_instance_valid(toolbar_button):
+					remove_control_from_container(EditorPlugin.CONTAINER_TOOLBAR, toolbar_button)
+					toolbar_button.queue_free()
+
+	# 2. Update Formats list from the dynamic UI rows
+	collapsible_formats.clear()
+	for child in formats_list_vbox.get_children():
+		var line_edit = child.get_child(0) as LineEdit
+		if line_edit:
+			var txt = line_edit.text.strip_edges()
+			if not txt.is_empty():
+				if not txt.begins_with("."):
+					txt = "." + txt
+				if not txt in collapsible_formats:
+					collapsible_formats.append(txt)
+	
+	# 3. Persist Settings to project.godot or editor settings
+	_save_config()
+	
+	# 4. Refresh Scenes logic if the collapsible formats changed
+	if collapse_instanced_scenes:
+		_render_scene_list()
+		
+	advanced_settings_dialog.hide()
+
+## Helper: Creates a styled background panel for ItemLists to make them stand out.
 func _create_list_panel() -> PanelContainer:
 	var list_style = StyleBoxFlat.new()
 	list_style.bg_color = THEME_LIST_BG
@@ -482,48 +768,79 @@ func _create_list_panel() -> PanelContainer:
 	list_panel.add_theme_stylebox_override("panel", list_style)
 	return list_panel
 
+## Constructs the bottom section of the main window (Autoloads, Project Settings, Export Buttons).
 func _create_footer_controls(parent: VBoxContainer) -> void:
-	var project_options_vbox = VBoxContainer.new()
-	parent.add_child(project_options_vbox)
+	var options_grid = GridContainer.new()
+	options_grid.columns = 2
+	options_grid.add_theme_constant_override("h_separation", 20)
+	options_grid.add_theme_constant_override("v_separation", 2)
+	parent.add_child(options_grid)
 	
-	# --- Autoloads Section ---
+	# --- Autoloads (Globals) Section ---
+	var autoloads_hbox = HBoxContainer.new()
+	autoloads_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	autoloads_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(autoloads_hbox)
+
 	var autoloads_checkbox = CheckBox.new()
 	autoloads_checkbox.text = "Include Globals (Autoloads/Singletons)"
 	autoloads_checkbox.button_pressed = true
-	project_options_vbox.add_child(autoloads_checkbox)
+	autoloads_hbox.add_child(autoloads_checkbox)
+	
+	autoloads_hbox.add_child(_create_info_icon(
+		"Exports Scripts and Scenes defined in Project Settings -> Autoload.\n" +
+		"Provides context about Singletons and global variables accessible from anywhere in your code.\n" +
+		"When enabled, selected scripts which are autoloaded will be ignored at export to prevent duplicates."
+	))
+	
+	# --- Project Settings Section ---
+	var proj_godot_hbox = HBoxContainer.new()
+	proj_godot_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	proj_godot_hbox.add_theme_constant_override("separation", INFO_ICON_GAP)
+	options_grid.add_child(proj_godot_hbox)
+
+	var project_godot_checkbox = CheckBox.new()
+	project_godot_checkbox.text = "Include project.godot file content"
+	proj_godot_hbox.add_child(project_godot_checkbox)
+	
+	proj_godot_hbox.add_child(_create_info_icon(
+		"Exports key configuration details like Input Map actions, Layer Names, and Application settings.\n" +
+		"Helps understand project-wide constants and controls."
+	))
+
+	# --- Indented Sub-options (Markdown Wrappers) ---
+	
+	# Autoloads Markdown Checkbox (Child of Autoloads)
+	var al_margin = MarginContainer.new()
+	al_margin.add_theme_constant_override("margin_left", 24)
+	options_grid.add_child(al_margin)
 	
 	var wrap_autoloads_checkbox = CheckBox.new()
-	var al_margin = MarginContainer.new()
-	al_margin.add_theme_constant_override("margin_left", 20)
-	al_margin.add_child(wrap_autoloads_checkbox)
-	
-	wrap_autoloads_checkbox.text = "Wrap in Markdown"
+	wrap_autoloads_checkbox.text = "Use Markdown"
 	wrap_autoloads_checkbox.button_pressed = true
 	wrap_autoloads_checkbox.toggled.connect(func(p): wrap_autoloads_in_markdown = p)
-	project_options_vbox.add_child(al_margin)
+	al_margin.add_child(wrap_autoloads_checkbox)
 	
+	# Logic: Disable the markdown sub-checkbox if the main Autoloads checkbox is off.
 	autoloads_checkbox.toggled.connect(func(p): 
 		include_autoloads = p
 		wrap_autoloads_checkbox.disabled = not p
 		if not p: wrap_autoloads_checkbox.button_pressed = false
 		else: wrap_autoloads_checkbox.button_pressed = wrap_autoloads_in_markdown
 	)
-	
-	# --- Project.godot Section ---
-	var project_godot_checkbox = CheckBox.new()
-	project_godot_checkbox.text = "Include `project.godot` file content"
-	project_options_vbox.add_child(project_godot_checkbox)
+
+	# Project.godot Markdown Checkbox (Child of Project Settings)
+	var proj_margin = MarginContainer.new()
+	proj_margin.add_theme_constant_override("margin_left", 24)
+	options_grid.add_child(proj_margin)
 
 	var wrap_project_godot_checkbox = CheckBox.new()
-	var margin_container = MarginContainer.new()
-	margin_container.add_theme_constant_override("margin_left", 20)
-	margin_container.add_child(wrap_project_godot_checkbox)
-	
-	wrap_project_godot_checkbox.text = "Wrap in Markdown (```ini```)"
+	wrap_project_godot_checkbox.text = "Use Markdown (```ini```)"
 	wrap_project_godot_checkbox.disabled = true
 	wrap_project_godot_checkbox.toggled.connect(func(p): wrap_project_godot_in_markdown = p)
-	project_options_vbox.add_child(margin_container)
+	proj_margin.add_child(wrap_project_godot_checkbox)
 
+	# Logic: Disable the markdown sub-checkbox if the main project.godot checkbox is off.
 	project_godot_checkbox.toggled.connect(func(p):
 		include_project_godot = p
 		wrap_project_godot_checkbox.disabled = not p
@@ -531,19 +848,7 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 			wrap_project_godot_checkbox.button_pressed = false
 	)
 
-	# --- Action Buttons Row 1 (Settings) ---
-	var settings_hbox = HBoxContainer.new()
-	settings_hbox.alignment = BoxContainer.ALIGNMENT_END
-	parent.add_child(settings_hbox)
-	
-	var adv_btn = Button.new()
-	adv_btn.text = "Advanced Settings"
-	adv_btn.flat = true
-	adv_btn.add_theme_color_override("font_color", COLOR_ACCENT)
-	adv_btn.pressed.connect(_on_advanced_settings_pressed)
-	settings_hbox.add_child(adv_btn)
-
-	# --- Action Buttons Row 2 (Export) ---
+	# --- Main Action Buttons (Copy / Save) ---
 	var hbox = HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 20)
 	hbox.alignment = HBoxContainer.ALIGNMENT_CENTER
@@ -554,6 +859,7 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 	copy_button.custom_minimum_size = Vector2(150, 35)
 	var copy_style = StyleBoxFlat.new(); copy_style.bg_color = COLOR_COPY_BTN
 	copy_button.add_theme_stylebox_override("normal", copy_style)
+	# Pass 'true' to indicate clipboard export
 	copy_button.pressed.connect(_export_selected.bind(true))
 	hbox.add_child(copy_button)
 	
@@ -562,12 +868,26 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 	save_button.custom_minimum_size = Vector2(150, 35)
 	var save_style = StyleBoxFlat.new(); save_style.bg_color = COLOR_SAVE_BTN
 	save_button.add_theme_stylebox_override("normal", save_style)
+	# Pass 'false' to indicate file export
 	save_button.pressed.connect(_export_selected.bind(false))
 	hbox.add_child(save_button)
 	
+	# Status label for feedback (e.g. "Copied 5 scripts")
 	status_label = Label.new()
 	status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	parent.add_child(status_label)
+
+## Helper: Creates a standard Label formatted as an info icon with a tooltip.
+func _create_info_icon(tooltip_text: String) -> Label:
+	var label = Label.new()
+	label.text = "ⓘ" 
+	label.tooltip_text = tooltip_text
+	label.mouse_filter = Control.MOUSE_FILTER_STOP # Ensures the tooltip event is caught
+	label.mouse_default_cursor_shape = Control.CURSOR_HELP
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.add_theme_color_override("font_color", INFO_ICON_COLOR)
+	label.add_theme_font_size_override("font_size", INFO_ICON_SIZE)
+	return label
 
 #endregion
 
@@ -575,7 +895,50 @@ func _create_footer_controls(parent: VBoxContainer) -> void:
 #region Data Management & Rendering
 #-----------------------------------------------------------------------------
 
+func _load_config() -> void:
+	# Load Formats
+	if ProjectSettings.has_setting(SETTING_FORMATS_PATH):
+		var setting_value = ProjectSettings.get_setting(SETTING_FORMATS_PATH)
+		if setting_value is PackedStringArray:
+			collapsible_formats = Array(setting_value)
+		else:
+			collapsible_formats = setting_value
+	else:
+		collapsible_formats = DEFAULT_COLLAPSIBLE_FORMATS.duplicate()
+	
+	# Load UI Preference
+	if ProjectSettings.has_setting(SETTING_SHOW_BUTTON_PATH):
+		show_editor_button = ProjectSettings.get_setting(SETTING_SHOW_BUTTON_PATH)
+	else:
+		show_editor_button = true
+
+func _save_config() -> void:
+	# Save Formats
+	var data_to_save = PackedStringArray(collapsible_formats)
+	ProjectSettings.set_setting(SETTING_FORMATS_PATH, data_to_save)
+	ProjectSettings.add_property_info({
+		"name": SETTING_FORMATS_PATH,
+		"type": TYPE_PACKED_STRING_ARRAY,
+		"hint": PROPERTY_HINT_NONE,
+	})
+	ProjectSettings.set_initial_value(SETTING_FORMATS_PATH, PackedStringArray(DEFAULT_COLLAPSIBLE_FORMATS))
+	
+	# Save UI Preference
+	ProjectSettings.set_setting(SETTING_SHOW_BUTTON_PATH, show_editor_button)
+	ProjectSettings.add_property_info({
+		"name": SETTING_SHOW_BUTTON_PATH,
+		"type": TYPE_BOOL,
+		"hint": PROPERTY_HINT_NONE,
+	})
+	ProjectSettings.set_initial_value(SETTING_SHOW_BUTTON_PATH, true)
+	
+	# Commit to file
+	var error = ProjectSettings.save()
+	if error != OK:
+		push_error("Context Exporter: Could not save settings. Error: %s" % error)
+
 func open_window() -> void:
+	# Scan the project files every time the window opens to ensure the list is fresh
 	_scan_and_refresh()
 	
 	status_label.remove_theme_color_override("font_color")
@@ -583,40 +946,42 @@ func open_window() -> void:
 	window.popup_centered()
 
 func _scan_and_refresh() -> void:
-	# Scripts
+	# Find all relevant files
 	var gd_scripts = _find_files_recursive("res://", ".gd")
 	var cs_scripts = _find_files_recursive("res://", ".cs")
 	all_script_paths = gd_scripts + cs_scripts
 	all_script_paths.sort()
 	
-	# Scenes
 	all_scene_paths = _find_files_recursive("res://", ".tscn")
 	all_scene_paths.sort()
 	
+	# Rebuild internal data models
 	_build_script_data_model()
 	_render_script_list()
 	
 	_build_scene_data_model()
 	_render_scene_list()
 
-# --- Scripts Model ---
+# --- Scripts Model Construction ---
 func _build_script_data_model() -> void:
-	if group_depth == 0:
+	# Decide between Tree Structure (Depth 0) or Flat Groups (Depth > 0)
+	if group_by_folder and group_depth == 0:
 		_build_recursive_tree_data(all_script_paths, tree_nodes, "tree_nodes")
 	else:
 		_build_flat_group_data(all_script_paths, folder_data, group_depth)
 
-# --- Scenes Model ---
+# --- Scenes Model Construction ---
 func _build_scene_data_model() -> void:
-	if scene_group_depth == 0:
+	if scene_group_by_folder and scene_group_depth == 0:
 		_build_recursive_tree_data(all_scene_paths, scene_tree_nodes, "scene_tree_nodes")
 	else:
 		_build_flat_group_data(all_scene_paths, scene_folder_data, scene_group_depth)
 
-# --- Generic Logic Helpers ---
+# --- Shared Logic ---
 
 func _get_group_dir_for_path(path: String, depth: int) -> String:
-	if depth == 0: return path.get_base_dir() # Should handle recursive elsewhere
+	# Helper to find the "virtual" folder path based on the selected depth level
+	if depth == 0: return path.get_base_dir()
 	
 	var clean_path = path.trim_prefix("res://")
 	var parts = clean_path.split("/")
@@ -628,7 +993,7 @@ func _get_group_dir_for_path(path: String, depth: int) -> String:
 	return "res://" + "/".join(subset)
 
 func _build_flat_group_data(all_paths: Array[String], out_data: Dictionary, depth: int) -> void:
-	# Save state
+	# Preserves checked state when rebuilding the model
 	var old_checked = {}
 	for dir in out_data:
 		if out_data[dir].has("items"):
@@ -647,7 +1012,7 @@ func _build_flat_group_data(all_paths: Array[String], out_data: Dictionary, dept
 		var is_checked = old_checked.has(path)
 		out_data[dir]["items"][path] = {"is_checked": is_checked}
 	
-	# Update group check state
+	# Determine folder checked state based on children
 	for dir in out_data:
 		var all_checked = true
 		var items = out_data[dir]["items"]
@@ -662,7 +1027,7 @@ func _build_recursive_tree_data(all_paths: Array[String], out_nodes: Dictionary,
 	var old_state = out_nodes.duplicate(true)
 	out_nodes.clear()
 	
-	# Root
+	# Ensure Root exists
 	if not out_nodes.has("res://"):
 		var was_expanded = true
 		if old_state.has("res://"): was_expanded = old_state["res://"]["is_expanded"]
@@ -683,6 +1048,7 @@ func _build_recursive_tree_data(all_paths: Array[String], out_nodes: Dictionary,
 			"is_checked": was_checked
 		}
 		
+		# Build parent folders up to root
 		var current_path = file_path
 		while current_path != "res://":
 			var parent_dir = current_path.get_base_dir()
@@ -704,10 +1070,10 @@ func _build_recursive_tree_data(all_paths: Array[String], out_nodes: Dictionary,
 			
 			current_path = parent_dir
 			if current_path == "res://" and not out_nodes["res://"]["children"].has(current_path):
-				# Safety catch, though loop should end
+				# Break loop if we reached root but logic failed, though unusual
 				pass
 
-	# Update folder checks (simple pass)
+	# Post-process: update folder checkboxes based on children
 	for path in out_nodes:
 		if out_nodes[path]["type"] == "folder":
 			_update_tree_folder_checked_state(path, out_nodes)
@@ -729,27 +1095,25 @@ func _update_tree_folder_checked_state(folder_path: String, nodes_dict: Dictiona
 	node["is_checked"] = all_children_checked
 	return all_children_checked
 
-# --- Script Rendering ---
+# --- Rendering ---
 
 func _render_script_list() -> void:
 	script_list.clear()
-	if group_depth == 0:
-		_render_recursive_tree_list(script_list, tree_nodes, "res://", 0, "script")
-	elif group_by_folder:
-		_render_flat_list(script_list, folder_data, "script")
-	else:
+	if not group_by_folder:
 		_render_simple_flat_list(script_list, all_script_paths, folder_data, "script")
-
-# --- Scene Rendering ---
+	elif group_depth == 0:
+		_render_recursive_tree_list(script_list, tree_nodes, "res://", 0, "script")
+	else:
+		_render_flat_list(script_list, folder_data, "script")
 
 func _render_scene_list() -> void:
 	scene_list.clear()
-	if scene_group_depth == 0:
-		_render_recursive_tree_list(scene_list, scene_tree_nodes, "res://", 0, "scene")
-	elif scene_group_by_folder:
-		_render_flat_list(scene_list, scene_folder_data, "scene")
-	else:
+	if not scene_group_by_folder:
 		_render_simple_flat_list(scene_list, all_scene_paths, scene_folder_data, "scene")
+	elif scene_group_depth == 0:
+		_render_recursive_tree_list(scene_list, scene_tree_nodes, "res://", 0, "scene")
+	else:
+		_render_flat_list(scene_list, scene_folder_data, "scene")
 
 # --- Generic Rendering Helpers ---
 
@@ -786,6 +1150,7 @@ func _render_recursive_tree_list(list: ItemList, nodes: Dictionary, current_path
 	})
 	
 	if is_folder and node["is_expanded"]:
+		# Sort folders first, then files
 		var folders = []
 		var files = []
 		for child_path in node["children"]:
@@ -834,26 +1199,11 @@ func _render_flat_list(list: ItemList, data_dict: Dictionary, item_type: String)
 				list.set_item_metadata(item_idx, {"mode": "flat", "type": "file", "path": path, "item_type": item_type})
 
 func _render_simple_flat_list(list: ItemList, all_paths: Array[String], data_dict: Dictionary, item_type: String) -> void:
-	# Even in simple mode, we use data_dict to track checked state if needed, 
-	# but simple mode usually means "No grouping". 
-	# To keep state consistent, we will just use the flat data logic but render without folders.
-	# But wait, logic "Depth > 0" uses data_dict. Logic "No Grouping" is basically flat list.
-	# To persist selection we need to look up in the data structure that is currently active or a unified one.
-	# For simplicity, if Grouping is OFF, we iterate all_paths and check a "global set" or just the data_dict for keys.
-	# Let's assume folder_data populated with depth-logic or simple logic. 
-	
-	# Actually, the requirement was "Group by Folder off". 
-	# Let's map check state from folder_data (using parent dir logic)
-	
+	# Even in simple mode, we try to use the dictionary to maintain checked state consistency
 	for path in all_paths:
 		var is_checked = false
-		# Look up in data_dict (which is built based on Depth)
-		# If Depth logic was active, keys exist.
-		# But if Grouping is toggled OFF, we need to know check state.
-		# Let's check against the `folder_data` assuming it was built for the current state.
-		var dir = _get_group_dir_for_path(path, 0 if (item_type == "script" and group_depth == 0) or (item_type == "scene" and scene_group_depth == 0) else 1)
-		# This is getting complex to share state between modes.
-		# Simplification: We look into folder_data searching for the path in any folder.
+		
+		# Look up check state in the dictionary
 		for d in data_dict:
 			if data_dict[d].has("items") and data_dict[d]["items"].has(path):
 				is_checked = data_dict[d]["items"][path]["is_checked"]
@@ -885,6 +1235,14 @@ func _on_manage_formats_pressed() -> void:
 func _on_advanced_settings_pressed() -> void:
 	if not is_instance_valid(advanced_settings_dialog):
 		_create_advanced_settings_dialog()
+	
+	# Reset list to current state
+	for child in formats_list_vbox.get_children():
+		child.queue_free()
+		
+	for ext in collapsible_formats:
+		_add_format_row(ext)
+	
 	advanced_settings_dialog.popup_centered()
 
 func _on_include_addons_toggled(pressed: bool) -> void:
@@ -902,7 +1260,7 @@ func _on_format_dialog_ok() -> void:
 			collapsible_formats.append(text)
 	format_manager_dialog.hide()
 
-# --- Common Click Logic ---
+# --- Shared Interaction Logic ---
 
 func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_button_index: int, 
 						tree_dict: Dictionary, flat_dict: Dictionary, is_tree_mode: bool, 
@@ -916,7 +1274,7 @@ func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_
 		var path = meta["path"]
 		var node = tree_dict[path]
 		
-		# Heuristic for click position
+		# Estimate UI zones based on depth
 		var depth = 0
 		var p = node["parent"]
 		while p != "":
@@ -928,6 +1286,7 @@ func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_
 		var checkbox_zone_start = arrow_zone
 		
 		if node["type"] == "folder":
+			# Click on arrow toggles expansion, click elsewhere toggles check
 			if at_position.x < checkbox_zone_start:
 				node["is_expanded"] = not node["is_expanded"]
 			else:
@@ -947,7 +1306,7 @@ func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_
 		
 		elif meta["type"] == "file":
 			var path = meta["path"]
-			# Find which dir contains this
+			# Find containing dir to update its check state
 			var found_dir = ""
 			for d in flat_dict:
 				if flat_dict[d].items.has(path):
@@ -955,7 +1314,8 @@ func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_
 			
 			if found_dir != "":
 				flat_dict[found_dir].items[path].is_checked = not flat_dict[found_dir].items[path].is_checked
-				# Update folder check
+				
+				# Refresh parent folder check status
 				var all_checked = true
 				for s_path in flat_dict[found_dir].items:
 					if not flat_dict[found_dir].items[s_path].is_checked:
@@ -963,16 +1323,16 @@ func _handle_item_click(list: ItemList, index: int, at_position: Vector2, mouse_
 				flat_dict[found_dir].is_checked = all_checked
 				
 	elif meta["mode"] == "simple":
-		# Simple Flat
+		# Simple Flat List Mode
 		var path = meta["path"]
-		# Update in flat_dict to persist state
 		for d in flat_dict:
 			if flat_dict[d].items.has(path):
 				flat_dict[d].items[path].is_checked = not flat_dict[d].items[path].is_checked
 
+	# Re-render to show changes
 	refresh_callback.call()
 
-# --- Script Event Handlers ---
+# --- Script Handlers ---
 
 func _on_script_item_clicked(index: int, at_position: Vector2, mouse_button_index: int) -> void:
 	_handle_item_click(script_list, index, at_position, mouse_button_index, 
@@ -1007,10 +1367,9 @@ func _on_select_all_scripts_toggled() -> void:
 		_select_all_flat(is_checked, folder_data)
 	_render_script_list()
 
-# --- Scene Event Handlers ---
+# --- Scene Handlers ---
 
 func _on_scene_item_clicked(index: int, at_position: Vector2, mouse_button_index: int) -> void:
-	# Using the same generic handler
 	_handle_item_click(scene_list, index, at_position, mouse_button_index,
 		scene_tree_nodes, scene_folder_data, scene_group_depth == 0,
 		_render_scene_list, _toggle_scene_tree_checkbox, Callable())
@@ -1043,7 +1402,7 @@ func _on_select_all_scenes_toggled() -> void:
 		_select_all_flat(is_checked, scene_folder_data)
 	_render_scene_list()
 
-# --- Generic Logic Implementations ---
+# --- Logic Implementation Helpers ---
 
 func _toggle_generic_tree_checkbox(path: String, new_state: bool, nodes: Dictionary) -> void:
 	if not nodes.has(path): return
@@ -1057,6 +1416,7 @@ func _toggle_generic_tree_checkbox(path: String, new_state: bool, nodes: Diction
 	_update_parent_check_state(node["parent"], nodes)
 
 func _update_parent_check_state(parent_path: String, nodes: Dictionary) -> void:
+	# Recursively ensure parent checkboxes reflect the state of their children
 	if parent_path == "" or not nodes.has(parent_path): return
 	
 	var parent = nodes[parent_path]
@@ -1097,42 +1457,63 @@ func _export_selected(to_clipboard: bool) -> void:
 	selected_scripts.sort()
 	selected_scenes.sort()
 
-	# Validate selection
-	if not include_project_godot and not include_autoloads and selected_scripts.is_empty() and selected_scenes.is_empty():
+	# Handle Autoloads (Singletons)
+	# We fetch them first to avoid duplicating code if an Autoload script is also selected manually.
+	var autoloads = {"scripts": [], "scenes": []}
+	var has_autoloads = false
+	
+	if include_autoloads:
+		autoloads = _get_project_autoloads()
+		has_autoloads = not autoloads["scripts"].is_empty() or not autoloads["scenes"].is_empty()
+		
+		# Filter Scripts: Remove if already in Autoloads
+		var unique_scripts: Array[String] = []
+		for path in selected_scripts:
+			if not path in autoloads["scripts"]:
+				unique_scripts.append(path)
+		selected_scripts = unique_scripts
+		
+		# Filter Scenes: Remove if already in Autoloads
+		var unique_scenes: Array[String] = []
+		for path in selected_scenes:
+			if not path in autoloads["scenes"]:
+				unique_scenes.append(path)
+		selected_scenes = unique_scenes
+
+	# Validation: Ensure we actually have something to export
+	if not include_project_godot and not has_autoloads and selected_scripts.is_empty() and selected_scenes.is_empty():
 		_set_status_message("Nothing selected to export.", COLOR_WARNING)
 		return
 		
 	var content_text = ""
 	
-	# 1. Project.godot
+	# 1. Export Project Settings
 	if include_project_godot:
 		content_text += _build_project_godot_content()
 
-	# 2. Autoloads / Globals
-	if include_autoloads:
-		var autoloads = _get_project_autoloads()
-		if not autoloads["scripts"].is_empty() or not autoloads["scenes"].is_empty():
-			if not content_text.is_empty(): content_text += "\n\n"
-			content_text += "--- AUTOLOADS / GLOBALS ---\n\n"
-			
-			if not autoloads["scripts"].is_empty():
-				content_text += _build_scripts_content(autoloads["scripts"], wrap_autoloads_in_markdown)
-			
-			if not autoloads["scenes"].is_empty():
-				if not autoloads["scripts"].is_empty(): content_text += "\n\n"
-				content_text += _build_scenes_content(autoloads["scenes"], wrap_autoloads_in_markdown)
+	# 2. Export Autoloads
+	if has_autoloads:
+		if not content_text.is_empty(): content_text += "\n\n"
+		content_text += "--- AUTOLOADS / GLOBALS ---\n\n"
+		
+		if not autoloads["scripts"].is_empty():
+			content_text += _build_scripts_content(autoloads["scripts"], wrap_autoloads_in_markdown)
+		
+		if not autoloads["scenes"].is_empty():
+			if not autoloads["scripts"].is_empty(): content_text += "\n\n"
+			content_text += _build_scenes_content(autoloads["scenes"], wrap_autoloads_in_markdown)
 
-	# 3. Selected Scripts
+	# 3. Export Selected Scripts
 	if not selected_scripts.is_empty():
 		if not content_text.is_empty(): content_text += "\n\n"
 		content_text += "--- SCRIPTS ---\n\n"
-		content_text += _build_scripts_content(selected_scripts) # Use default UI flag
+		content_text += _build_scripts_content(selected_scripts) 
 	
-	# 4. Selected Scenes
+	# 4. Export Selected Scenes
 	if not selected_scenes.is_empty():
 		if not content_text.is_empty(): content_text += "\n\n"
 		content_text += "--- SCENES ---\n\n"
-		content_text += _build_scenes_content(selected_scenes) # Use default UI flag
+		content_text += _build_scenes_content(selected_scenes)
 	
 	# Finalize
 	var total_lines = content_text.split("\n").size()
@@ -1140,7 +1521,7 @@ func _export_selected(to_clipboard: bool) -> void:
 	
 	var items_str = "%d script(s), %d scene(s)" % [selected_scripts.size(), selected_scenes.size()]
 	if include_project_godot: items_str += ", project.godot"
-	if include_autoloads: items_str += " + Globals"
+	if has_autoloads: items_str += " + Globals"
 
 	if to_clipboard:
 		DisplayServer.clipboard_set(content_text)
@@ -1200,6 +1581,8 @@ func _get_selected_paths_generic(is_tree: bool, tree_dict: Dictionary, flat_dict
 #-----------------------------------------------------------------------------
 
 func _build_project_godot_content() -> String:
+	# Constructs a simplified INI-style representation of project.godot.
+	# We focus on fields relevant for context (name, main_scene, input map, layers).
 	var content = ""
 	content += "[application]\n"
 	
@@ -1209,6 +1592,7 @@ func _build_project_godot_content() -> String:
 	
 	var main_scene = ProjectSettings.get_setting("application/run/main_scene", "")
 	if not main_scene.is_empty():
+		# Resolve UID to actual path for readability
 		if main_scene.begins_with("uid://"):
 			var uid_id = ResourceUID.text_to_id(main_scene)
 			if ResourceUID.has_id(uid_id):
@@ -1315,13 +1699,14 @@ func _build_tree_string_for_scene(root_node: Node) -> String:
 	var root_line = _get_node_info_string(root_node)
 	var scene_path = root_node.get_scene_file_path()
 	
+	# If root matches collapsible format, stop deep recursion
 	if collapse_instanced_scenes and _path_ends_with_collapsible_format(scene_path):
 		return root_line
 	
 	var children_lines: Array[String] = []
-	
 	var signal_strings = _get_node_signals(root_node)
 	var real_children = root_node.get_children()
+	
 	var has_signals = not signal_strings.is_empty()
 	var has_children = not real_children.is_empty()
 	
@@ -1329,41 +1714,86 @@ func _build_tree_string_for_scene(root_node: Node) -> String:
 		var is_last_item = not has_children
 		children_lines.append(_format_signals_block(signal_strings, "", is_last_item))
 
-	for i in range(real_children.size()):
-		var child = real_children[i]
-		var is_last = (i == real_children.size() - 1)
-		children_lines.append(_build_tree_recursive_helper(child, "", is_last))
+	# Recurse with node merging logic
+	_build_children_lines_grouped(real_children, "", children_lines)
 
 	return root_line + ("\n" if not children_lines.is_empty() else "") + "\n".join(children_lines)
 
-func _build_tree_recursive_helper(node: Node, prefix: String, is_last: bool) -> String:
-	var line_prefix = prefix + ("└── " if is_last else "├── ")
-	var node_info = _get_node_info_string(node)
-	var current_line = line_prefix + node_info
-	
-	var scene_path = node.get_scene_file_path()
-	if collapse_instanced_scenes and _path_ends_with_collapsible_format(scene_path):
-		return current_line
-	
-	var child_prefix = prefix + ("    " if is_last else "│   ")
-	var children_lines: Array[String] = []
-	
-	var signal_strings = _get_node_signals(node)
-	var real_children = node.get_children()
-	
-	var has_signals = not signal_strings.is_empty()
-	var has_children = not real_children.is_empty()
-	
-	if has_signals:
-		var signals_is_last = not has_children 
-		children_lines.append(_format_signals_block(signal_strings, child_prefix, signals_is_last))
-	
-	for i in range(real_children.size()):
-		var child = real_children[i]
-		var is_last_child = (i == real_children.size() - 1)
-		children_lines.append(_build_tree_recursive_helper(child, child_prefix, is_last_child))
+func _build_children_lines_grouped(children: Array[Node], prefix: String, out_lines: Array[String]) -> void:
+	# Iterates through children and intelligently groups adjacent identical nodes.
+	var count = children.size()
+	if count == 0: return
+
+	var i = 0
+	while i < count:
+		var current_node = children[i]
+		var group_size = 1
 		
-	return current_line + ("\n" if not children_lines.is_empty() else "") + "\n".join(children_lines)
+		# Look ahead for duplicates if merging is enabled
+		if merge_similar_nodes:
+			var j = i + 1
+			while j < count:
+				var next_node = children[j]
+				if _are_nodes_similar(current_node, next_node):
+					group_size += 1
+					j += 1
+				else:
+					break
+		
+		var is_last_item = (i + group_size == count)
+		var line_prefix = prefix + ("└── " if is_last_item else "├── ")
+		var node_info = _get_node_info_string(current_node)
+		
+		# Format group indicator (x5)
+		if group_size > 1:
+			if " (" in node_info:
+				node_info = node_info.replace(" (", " [b](x%d)[/b] (" % group_size)
+			else:
+				node_info += " [b](x%d)[/b]" % group_size
+			node_info = node_info.replace("[b]", "").replace("[/b]", "")
+
+		out_lines.append(line_prefix + node_info)
+		
+		# Recursive step:
+		# If we grouped nodes, we only show the children of the FIRST node as an example structure.
+		var current_scene_path = current_node.get_scene_file_path()
+		var is_collapsed = collapse_instanced_scenes and _path_ends_with_collapsible_format(current_scene_path)
+		
+		if not is_collapsed:
+			var child_prefix = prefix + ("    " if is_last_item else "│   ")
+			
+			var signal_strings = _get_node_signals(current_node)
+			var sub_children = current_node.get_children()
+			
+			var has_sub_signals = not signal_strings.is_empty()
+			var has_sub_children = not sub_children.is_empty()
+			
+			if has_sub_signals:
+				var sig_is_last = not has_sub_children
+				out_lines.append(_format_signals_block(signal_strings, child_prefix, sig_is_last))
+			
+			if has_sub_children:
+				_build_children_lines_grouped(sub_children, child_prefix, out_lines)
+		
+		i += group_size
+
+func _are_nodes_similar(node_a: Node, node_b: Node) -> bool:
+	if not is_instance_valid(node_a) or not is_instance_valid(node_b):
+		return false
+		
+	# 1. Check Scene paths
+	var scene_a = node_a.get_scene_file_path()
+	var scene_b = node_b.get_scene_file_path()
+	if not scene_a.is_empty() or not scene_b.is_empty():
+		return scene_a == scene_b
+
+	# 2. Check Class and Script
+	if node_a.get_class() != node_b.get_class():
+		return false
+	if node_a.get_script() != node_b.get_script():
+		return false
+		
+	return true
 
 func _format_signals_block(signals: Array, prefix: String, is_last: bool) -> String:
 	var connector = "└── " if is_last else "├── "
@@ -1380,6 +1810,8 @@ func _format_signals_block(signals: Array, prefix: String, is_last: bool) -> Str
 	return result
 
 func _generate_clean_input_section() -> String:
+	# Convert Godot's InputMap dictionary into a human-readable text format.
+	# Saves tokens compared to dumping raw InputEvent objects.
 	var output = "[input]\n\n"
 	var input_props = []
 	
@@ -1430,38 +1862,11 @@ func _format_input_event(event: InputEvent) -> String:
 		return "MouseBtn(%s)" % btn_name
 		
 	elif event is InputEventJoypadButton:
-		var btn_name = str(event.button_index)
-		match event.button_index:
-			JOY_BUTTON_A: btn_name = "A"
-			JOY_BUTTON_B: btn_name = "B"
-			JOY_BUTTON_X: btn_name = "X"
-			JOY_BUTTON_Y: btn_name = "Y"
-			JOY_BUTTON_BACK: btn_name = "Back"
-			JOY_BUTTON_GUIDE: btn_name = "Guide"
-			JOY_BUTTON_START: btn_name = "Start"
-			JOY_BUTTON_LEFT_STICK: btn_name = "LStick"
-			JOY_BUTTON_RIGHT_STICK: btn_name = "RStick"
-			JOY_BUTTON_LEFT_SHOULDER: btn_name = "LB"
-			JOY_BUTTON_RIGHT_SHOULDER: btn_name = "RB"
-			JOY_BUTTON_DPAD_UP: btn_name = "DpadUp"
-			JOY_BUTTON_DPAD_DOWN: btn_name = "DpadDown"
-			JOY_BUTTON_DPAD_LEFT: btn_name = "DpadLeft"
-			JOY_BUTTON_DPAD_RIGHT: btn_name = "DpadRight"
-			JOY_BUTTON_MISC1: btn_name = "Misc1"
-		return "JoyBtn(%s)" % btn_name
+		return "JoyBtn(%s)" % str(event.button_index)
 		
 	elif event is InputEventJoypadMotion:
-		var axis_name = str(event.axis)
-		match event.axis:
-			JOY_AXIS_LEFT_X: axis_name = "LeftX"
-			JOY_AXIS_LEFT_Y: axis_name = "LeftY"
-			JOY_AXIS_RIGHT_X: axis_name = "RightX"
-			JOY_AXIS_RIGHT_Y: axis_name = "RightY"
-			JOY_AXIS_TRIGGER_LEFT: axis_name = "LT"
-			JOY_AXIS_TRIGGER_RIGHT: axis_name = "RT"
-			
 		var dir = "+" if event.axis_value > 0 else "-"
-		return "JoyAxis(%s%s)" % [axis_name, dir]
+		return "JoyAxis(%s%s)" % [str(event.axis), dir]
 		
 	return ""
 
@@ -1521,6 +1926,8 @@ func _get_node_info_string(node: Node) -> String:
 	return node_type + attr_str
 
 func _get_changed_properties(node: Node) -> Dictionary:
+	# Compares current node properties against a fresh instance of the same class
+	# to find what has been modified in the Inspector.
 	var changed_props = {}
 	var default_node = ClassDB.instantiate(node.get_class())
 	if not is_instance_valid(default_node): return {}
@@ -1544,12 +1951,14 @@ func _get_changed_properties(node: Node) -> Dictionary:
 func _format_property_value(value: Variant) -> Variant:
 	if value == null: return null
 
+	# Simplify Objects to paths
 	if typeof(value) == TYPE_OBJECT:
 		if not is_instance_valid(value): return null
 		if value is Resource and not value.resource_path.is_empty():
 			return value.resource_path 
 		return null
 
+	# Format Transforms for readability
 	if typeof(value) == TYPE_TRANSFORM3D:
 		var pos = value.origin
 		var rot_deg = value.basis.get_euler() * (180.0 / PI)
@@ -1571,6 +1980,7 @@ func _format_property_value(value: Variant) -> Variant:
 		if not scale.is_equal_approx(Vector2.ONE): parts.append("scale: (%.2f, %.2f)" % [scale.x, scale.y])
 		return ", ".join(parts) if not parts.is_empty() else "Identity"
 
+	# Recursively clean arrays
 	if typeof(value) == TYPE_ARRAY:
 		var clean_array = []
 		for item in value:
@@ -1601,6 +2011,7 @@ func _path_ends_with_collapsible_format(path: String) -> bool:
 
 func _find_files_recursive(path: String, extension: String) -> Array[String]:
 	var files: Array[String] = []
+	# Skip the addons folder unless explicitly enabled to improve performance
 	if not include_addons and path.begins_with("res://addons"): return files
 	
 	var dir = DirAccess.open(path)
