@@ -50,16 +50,14 @@ Godot 4 plugin that exports selected GDScript files, Scene trees, and Project Se
 ## Output preview
 ![Screenshot](visuals/4.png)
 
-## Features
-*   📂 **Scripts:** Batch export `.gd` or `.cs` files (optionally grouped by folder).
-*   🌳 **Scenes:** Text-based visualization of Scene trees (includes Nodes, Signals, Groups, and Inspector changes).
-*   ⚙️ **Settings:** Includes `project.godot`, Autoloads (Globals), and cleaned-up Input Map.
-*   🤖 **LLM Ready:** Optional Markdown formatting (code blocks) for better parsing by AI.
-*   📋 **Output:** Copy directly to Clipboard or save to `res://context_exporter.txt`.
-
 ## Installation
-1. Copy the folder containing this plugin into your project's `addons/` directory.
+1. Go to AssetLib in Godot Editot, search Godot Context Exporter and download it
 2. Go to **Project → Project Settings → Plugins** and enable **Godot Context Exporter**.
+   
+### Or
+1. Download [latest release](https://github.com/1Stalk/godot-context-exporter/releases)
+2. Copy the folder containing this plugin into your project's `addons/` directory.
+3. Go to **Project → Project Settings → Plugins** and enable **Godot Context Exporter**.
 
 ## Usage
 Click on button in top right corner of editor  
